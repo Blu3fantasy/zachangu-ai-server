@@ -408,26 +408,27 @@ app.post("/ai/analyze", async (req, res) => {
 
     if (isPricingRequest && !hasAnyPricingData) {
       forcedMessage =
-        "No verified pricing on that route yet — use manual distance or a confirmed market price before quoting.";
+        "Hmm, I don't have pricing for that route yet — check the distance manually or ask someone who's done that run before quoting.";
     }
 
-    // ── SYSTEM PROMPT (lean version) ──────────────────────────────────────────
-    // Target: ~120 tokens vs ~350 tokens in the old version.
-    // Culture: casual, disciplined, team-builder, good work ethics.
-    const systemPrompt = `You are Tapiwa, Zachangu's dispatch AI. Casual, sharp, team-first. Malawi ride-hailing ops.
+    const systemPrompt = `You are Tapiwa, a real person on the Zachangu dispatch team in Lilongwe, Malawi. You help the crew with ops, pricing, and keeping things running.
 
-VOICE: Speak like a trusted team member — warm but disciplined. Encourage good habits. Keep the crew motivated and accountable without being preachy.
+team_message is how you talk in the group chat. Write it like you are texting your workmates — not like a report, not like a robot. Short, real, human. Say things like yeah, alright, good catch, let's sort this, hold on that one. React naturally to what is happening.
 
-RULES:
-- team_message: 1 sentence (2 max). Human tone. No bullets, no labels, no jargon.
-- Safety first: never send drivers into unsafe areas. Pause and escalate to supervisor if high-risk.
-- Pricing: only use supplied computed_fare or market_prices values. Never invent numbers.
-- Never take direct action (no approvals, cancellations, price edits, driver assignments).
-- category: incident|pricing_issue|driver_issue|traffic|system_issue|general_update
-- risk_level: low|medium|high
+BAD: Incident detected. Risk level: medium. Action required: notify supervisor.
+GOOD: Heeh, that does not sound right — let us pause that area and loop in the supervisor before sending anyone.
 
-Respond JSON only:
-{"category":"","risk_level":"","internal_summary":"","team_message":"","requires_supervisor_approval":false,"used_data":{"zones":[],"landmarks":[],"pricing_rules":[],"market_prices":[],"route_matrix":[],"computed_fare":null}}`;
+BAD: Estimated fare: MWK 3,000-3,500. Confirm route before dispatch.
+GOOD: Should be somewhere around 3k to 3,500 — just confirm the pickup spot first before you quote them.
+
+1-2 sentences max. No bullets. No labels. No formal tone.
+Safety: never send drivers into trouble spots. Escalate high-risk to supervisor.
+Pricing: only use numbers from computed_fare or market_prices. Never guess.
+Never take direct action — you advise, the dispatcher decides.
+category: incident|pricing_issue|driver_issue|traffic|system_issue|general_update
+risk_level: low|medium|high
+
+JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"","requires_supervisor_approval":false,"used_data":{"zones":[],"landmarks":[],"pricing_rules":[],"market_prices":[],"route_matrix":[],"computed_fare":null}}`;
 
     let aiResult = {};
 
@@ -513,17 +514,17 @@ Respond JSON only:
     if (!allowedRiskLevels.includes(riskLevel)) riskLevel = "low";
 
     let fallbackMessage =
-      "Got it team, let's stay focused and keep things moving smoothly.";
+"Alright team, noted — let's handle this and keep things moving.";
 
     if (category === "pricing_issue") {
       if (computedFare) {
-        fallbackMessage = `That route is roughly MWK ${computedFare.estimated_low_mwk.toLocaleString()}–${computedFare.estimated_high_mwk.toLocaleString()}, confirm pickup and traffic before quoting.`;
+        fallbackMessage = `Yeah should be around MWK ${computedFare.estimated_low_mwk.toLocaleString()} to ${computedFare.estimated_high_mwk.toLocaleString()} — just double-check the pickup and traffic before you tell them.`;
       } else if (context.market_prices.length > 0) {
         const mp = context.market_prices[0];
-        fallbackMessage = `Use MWK ${Number(mp.Min_Price).toLocaleString()}–${Number(mp.Max_Price).toLocaleString()} as a guide, then confirm with the rider before dispatch.`;
+        fallbackMessage = `Market rate for that is around MWK ${Number(mp.Min_Price).toLocaleString()} to ${Number(mp.Max_Price).toLocaleString()} — confirm with the rider before you dispatch.`;
       } else {
         fallbackMessage =
-          "No verified pricing on that route yet — use manual distance or a confirmed market price before quoting.";
+          "Hmm, I don't have pricing for that route yet — check the distance manually or ask someone who's done that run before quoting.";
       }
     }
 
