@@ -6,7 +6,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "1mb" }));
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
@@ -58,7 +58,13 @@ function cleanTapiwaMessage(message) {
   return String(message || "").replace(/@tapiwa/gi, "").trim();
 }
 
-async function supabaseFetch(table, limit = 50) {
+function cleanBaseUrl() {
+  return String(SUPABASE_URL || "")
+    .replace(/\/rest\/v1\/?$/, "")
+    .replace(/\/$/, "");
+}
+
+async function supabaseFetch(table, limit = 20) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     tableDebug[table] = {
       ok: false,
@@ -67,11 +73,7 @@ async function supabaseFetch(table, limit = 50) {
     return [];
   }
 
-  const cleanBaseUrl = SUPABASE_URL
-    .replace(/\/rest\/v1\/?$/, "")
-    .replace(/\/$/, "");
-
-  const url = `${cleanBaseUrl}/rest/v1/${table}?select=*&limit=${limit}`;
+  const url = `${cleanBaseUrl()}/rest/v1/${table}?select=*&limit=${limit}`;
 
   try {
     const response = await fetch(url, {
@@ -79,8 +81,7 @@ async function supabaseFetch(table, limit = 50) {
       headers: {
         apikey: SUPABASE_SERVICE_ROLE_KEY,
         Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation"
+        "Content-Type": "application/json"
       }
     });
 
@@ -95,18 +96,7 @@ async function supabaseFetch(table, limit = 50) {
       return [];
     }
 
-    let json = [];
-    try {
-      json = JSON.parse(text);
-    } catch {
-      tableDebug[table] = {
-        ok: false,
-        status: response.status,
-        error: "Could not parse Supabase JSON",
-        raw: text
-      };
-      return [];
-    }
+    const json = JSON.parse(text);
 
     tableDebug[table] = {
       ok: true,
@@ -124,61 +114,259 @@ async function supabaseFetch(table, limit = 50) {
   }
 }
 
-function textMatch(row, searchText) {
-  const rowText = Object.values(row || {})
-    .filter((v) => v !== null && v !== undefined)
-    .join(" ")
-    .toLowerCase();
-
-  const words = searchText
+function normalizeText(value) {
+  return String(value || "")
     .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 2);
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  return words.some((word) => rowText.includes(word));
+function getKeywords(message) {
+  const stopWords = new Set([
+    "price",
+    "fare",
+    "cost",
+    "from",
+    "to",
+    "the",
+    "for",
+    "please",
+    "give",
+    "estimate",
+    "route",
+    "how",
+    "much",
+    "should",
+    "we",
+    "charge",
+    "what",
+    "is"
+  ]);
+
+  return normalizeText(message)
+    .split(" ")
+    .filter((word) => word.length > 2 && !stopWords.has(word));
+}
+
+function rowText(row) {
+  return normalizeText(Object.values(row || {}).filter(Boolean).join(" "));
+}
+
+function scoreRow(row, keywords) {
+  const text = rowText(row);
+  let score = 0;
+
+  for (const word of keywords) {
+    if (text.includes(word)) score += 1;
+  }
+
+  return score;
+}
+
+function topMatches(rows, keywords, limit = 5) {
+  return rows
+    .map((row) => ({
+      row,
+      score: scoreRow(row, keywords)
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((item) => item.row);
+}
+
+function slimLandmark(row) {
+  return {
+    Landmark_ID: row.Landmark_ID,
+    Landmark_Name: row.Landmark_Name,
+    Area: row.Area,
+    Zone_ID: row.Zone_ID,
+    Nearby_Landmarks: row.Nearby_Landmarks
+  };
+}
+
+function slimZone(row) {
+  return {
+    Zone_ID: row.Zone_ID,
+    Zone_Name: row.Zone_Name,
+    Areas_Covered: row.Areas_Covered,
+    Zone_Type: row.Zone_Type,
+    Demand_Level: row.Demand_Level,
+    Strategic_Role: row.Strategic_Role
+  };
+}
+
+function slimPricingRule(row) {
+  return {
+    Vehicle_Type: row.Vehicle_Type,
+    Base_Rate_Per_KM_MWK: row.Base_Rate_Per_KM_MWK,
+    Minimum_Fare_MWK: row.Minimum_Fare_MWK,
+    Peak_Multiplier: row.Peak_Multiplier,
+    Night_Multiplier: row.Night_Multiplier,
+    Rain_Multiplier: row.Rain_Multiplier,
+    Commission_Percent: row.Commission_Percent,
+    Active: row.Active
+  };
+}
+
+function slimMarketPrice(row) {
+  return {
+    Route_ID: row.Route_ID,
+    Origin_Landmark: row.Origin_Landmark,
+    Destination_Landmark: row.Destination_Landmark,
+    Origin_Zone: row.Origin_Zone,
+    Destination_Zone: row.Destination_Zone,
+    Min_Price: row.Min_Price,
+    Max_Price: row.Max_Price,
+    Avg_Price: row.Avg_Price,
+    Last_Updated: row.Last_Updated
+  };
+}
+
+function slimRoute(row) {
+  return {
+    Route_Key: row.Route_Key,
+    From_Landmark: row.From_Landmark,
+    To_Landmark: row.To_Landmark,
+    Distance_KM: row.Distance_KM,
+    Time_Normal_Min: row.Time_Normal_Min,
+    Time_Peak_Min: row.Time_Peak_Min,
+    Zone_From: row.Zone_From,
+    Zone_To: row.Zone_To
+  };
+}
+
+function slimRisk(row) {
+  return {
+    Zone_ID: row.Zone_ID,
+    Rank_Name: row.Rank_Name,
+    Problem_Description: row.Problem_Description,
+    Category: row.Category,
+    Risk_Points: row.Risk_Points,
+    Universal_5_Step_Solution: row.Universal_5_Step_Solution
+  };
 }
 
 async function fetchZachanguContext(userMessage) {
-  const searchText = String(userMessage || "").toLowerCase();
+  const keywords = getKeywords(userMessage);
 
   const [
-    zones,
-    landmarks,
-    pricingRules,
-    marketPrices,
-    routeMatrix,
-    risks
+    zonesRaw,
+    landmarksRaw,
+    pricingRulesRaw,
+    marketPricesRaw,
+    routeMatrixRaw,
+    risksRaw
   ] = await Promise.all([
-    supabaseFetch("zones", 50),
-    supabaseFetch("landmarks", 150),
-    supabaseFetch("pricing_rules", 80),
-    supabaseFetch("market_prices", 120),
-    supabaseFetch("route_matrix", 150),
+    supabaseFetch("zones", 60),
+    supabaseFetch("landmarks", 250),
+    supabaseFetch("pricing_rules", 30),
+    supabaseFetch("market_prices", 150),
+    supabaseFetch("route_matrix", 250),
     supabaseFetch("risks", 80)
   ]);
 
-  const matchedLandmarks = landmarks.filter((row) => textMatch(row, searchText));
-  const matchedMarketPrices = marketPrices.filter((row) => textMatch(row, searchText));
-  const matchedRoutes = routeMatrix.filter((row) => textMatch(row, searchText));
-  const matchedZones = zones.filter((row) => textMatch(row, searchText));
-  const matchedRisks = risks.filter((row) => textMatch(row, searchText));
+  const matchedLandmarks = topMatches(landmarksRaw, keywords, 8);
+  const matchedZones = topMatches(zonesRaw, keywords, 6);
+  const matchedMarketPrices = topMatches(marketPricesRaw, keywords, 8);
+  const matchedRoutes = topMatches(routeMatrixRaw, keywords, 8);
+  const matchedRisks = topMatches(risksRaw, keywords, 5);
+
+  const relevantZoneIds = new Set();
+
+  for (const lm of matchedLandmarks) {
+    if (lm.Zone_ID) relevantZoneIds.add(lm.Zone_ID);
+  }
+
+  for (const route of matchedRoutes) {
+    if (route.Zone_From) relevantZoneIds.add(route.Zone_From);
+    if (route.Zone_To) relevantZoneIds.add(route.Zone_To);
+  }
+
+  for (const mp of matchedMarketPrices) {
+    if (mp.Origin_Zone) relevantZoneIds.add(mp.Origin_Zone);
+    if (mp.Destination_Zone) relevantZoneIds.add(mp.Destination_Zone);
+  }
+
+  const relevantZones = zonesRaw.filter((z) => relevantZoneIds.has(z.Zone_ID));
+
+  const activePricingRules = pricingRulesRaw
+    .filter((rule) => String(rule.Active || "").toLowerCase() === "yes")
+    .slice(0, 6);
 
   return {
-    zones: matchedZones.length ? matchedZones.slice(0, 15) : zones.slice(0, 15),
-    landmarks: matchedLandmarks.length ? matchedLandmarks.slice(0, 25) : landmarks.slice(0, 25),
-    pricing_rules: pricingRules.slice(0, 30),
-    market_prices: matchedMarketPrices.length ? matchedMarketPrices.slice(0, 25) : marketPrices.slice(0, 25),
-    route_matrix: matchedRoutes.length ? matchedRoutes.slice(0, 25) : routeMatrix.slice(0, 25),
-    risks: matchedRisks.length ? matchedRisks.slice(0, 15) : risks.slice(0, 15),
+    request_keywords: keywords.slice(0, 12),
+
+    zones: [...matchedZones, ...relevantZones]
+      .filter((v, i, arr) => arr.findIndex((x) => x.Zone_ID === v.Zone_ID) === i)
+      .slice(0, 6)
+      .map(slimZone),
+
+    landmarks: matchedLandmarks.slice(0, 8).map(slimLandmark),
+
+    pricing_rules: activePricingRules.length
+      ? activePricingRules.map(slimPricingRule)
+      : pricingRulesRaw.slice(0, 4).map(slimPricingRule),
+
+    market_prices: matchedMarketPrices.slice(0, 8).map(slimMarketPrice),
+
+    route_matrix: matchedRoutes.slice(0, 8).map(slimRoute),
+
+    risks: matchedRisks.slice(0, 5).map(slimRisk),
+
     data_counts: {
-      zones: zones.length,
-      landmarks: landmarks.length,
-      pricing_rules: pricingRules.length,
-      market_prices: marketPrices.length,
-      route_matrix: routeMatrix.length,
-      risks: risks.length
+      zones: zonesRaw.length,
+      landmarks: landmarksRaw.length,
+      pricing_rules: pricingRulesRaw.length,
+      market_prices: marketPricesRaw.length,
+      route_matrix: routeMatrixRaw.length,
+      risks: risksRaw.length
     },
+
+    matched_counts: {
+      zones: matchedZones.length,
+      landmarks: matchedLandmarks.length,
+      market_prices: matchedMarketPrices.length,
+      route_matrix: matchedRoutes.length,
+      risks: matchedRisks.length
+    },
+
     table_status: tableDebug
+  };
+}
+
+function calculateBasicFare(context) {
+  const route = context.route_matrix?.[0];
+  const rule =
+    context.pricing_rules?.find((r) =>
+      String(r.Vehicle_Type || "").toLowerCase().includes("motorbike")
+    ) || context.pricing_rules?.[0];
+
+  if (!route || !rule || !route.Distance_KM || !rule.Base_Rate_Per_KM_MWK) {
+    return null;
+  }
+
+  const distance = Number(route.Distance_KM);
+  const rate = Number(rule.Base_Rate_Per_KM_MWK);
+  const minimum = Number(rule.Minimum_Fare_MWK || 0);
+
+  if (!distance || !rate) return null;
+
+  const rawFare = distance * rate;
+  const baseFare = Math.max(rawFare, minimum);
+
+  const low = Math.round(baseFare * 0.95 / 500) * 500;
+  const high = Math.round(baseFare * 1.08 / 500) * 500;
+
+  return {
+    distance_km: distance,
+    vehicle_type: rule.Vehicle_Type,
+    base_rate_per_km: rate,
+    minimum_fare: minimum,
+    estimated_low_mwk: low,
+    estimated_high_mwk: high,
+    route_used: `${route.From_Landmark} → ${route.To_Landmark}`
   };
 }
 
@@ -206,12 +394,22 @@ app.post("/ai/analyze", async (req, res) => {
     }
 
     const cleanMessage = cleanTapiwaMessage(message);
-    const zachanguContext = await fetchZachanguContext(cleanMessage);
+    const context = await fetchZachanguContext(cleanMessage);
+    const computedFare = calculateBasicFare(context);
 
-    const hasPricingData =
-      zachanguContext.market_prices.length > 0 ||
-      zachanguContext.route_matrix.length > 0 ||
-      zachanguContext.pricing_rules.length > 0;
+    const isPricingRequest = /price|fare|cost|charge|quote/i.test(cleanMessage);
+    const hasAnyPricingData =
+      context.market_prices.length > 0 ||
+      context.route_matrix.length > 0 ||
+      context.pricing_rules.length > 0 ||
+      computedFare;
+
+    let forcedMessage = null;
+
+    if (isPricingRequest && !hasAnyPricingData) {
+      forcedMessage =
+        "I don’t have verified pricing data for that route yet, so use manual distance or a confirmed market price before quoting the customer.";
+    }
 
     const systemPrompt = `
 You are Tapiwa Ops AI for Zachangu Commuters Limited, a ride-hailing and dispatch operation in Malawi.
@@ -220,45 +418,44 @@ You only respond when called with @Tapiwa.
 
 You speak like a calm human team leader inside a dispatch team chat.
 
-STYLE RULES:
+STYLE:
 - team_message must sound like a normal human message.
 - One sentence is best. Two short sentences maximum.
 - No bullets inside team_message.
 - No labels inside team_message.
-- No scary or dramatic tone unless there is real danger.
+- No scary tone unless there is real danger.
 - Do not use phrases like "risk level", "category", "incident detected", or "action required" inside team_message.
 
-CATEGORY RULE:
+CATEGORY:
 category MUST be exactly one of:
 incident, pricing_issue, driver_issue, traffic, system_issue, general_update
 
-RISK RULE:
+RISK:
 risk_level MUST be exactly one of:
 low, medium, high
 
-REAL-WORLD ZACHANGU RULES:
+SAFETY:
 - Zachangu does NOT have security teams or enforcement units.
 - Never suggest sending security teams.
 - Never suggest sending drivers into unsafe areas.
-- Never suggest unrealistic actions.
 - For robbery, violence, threats, or accidents, prioritize safety first.
-- For unsafe locations, recommend pausing assignments in that area until supervisor clearance.
+- For unsafe locations, recommend pausing assignments until supervisor clearance.
 - High-risk issues must require supervisor approval.
 - Do not approve, cancel, assign drivers, block customers, change prices, or edit trips directly.
 
-PRICING RULES:
+PRICING:
 - Never invent fares.
-- Never give a fare number unless the supplied Zachangu context contains that fare, price, range, distance, or pricing rule.
-- If no pricing data is available, say to confirm using manual distance or verified market price.
-- If exact route_matrix or market_prices data exists, use it.
-- If only nearby data exists, clearly say it is an estimate.
-- Mention MWK only if context supports the amount.
+- Never give a fare number unless supplied context or computed_fare supports it.
+- If computed_fare exists, you may use that range.
+- If market_prices exists, you may use Min_Price, Max_Price, or Avg_Price.
+- If only partial route data exists, say it is an estimate.
+- If no pricing data exists, say dispatcher should confirm using manual distance or verified market price.
+- Mention MWK only when supported by supplied data.
 
-OUTPUT RULES:
+OUTPUT:
 Return JSON only.
 
-Return exactly this JSON structure:
-
+Return exactly:
 {
   "category": "",
   "risk_level": "",
@@ -270,21 +467,15 @@ Return exactly this JSON structure:
     "landmarks": [],
     "pricing_rules": [],
     "market_prices": [],
-    "route_matrix": []
+    "route_matrix": [],
+    "computed_fare": null
   }
 }
 `;
 
-    let groqTeamMessage = null;
-
-    if (!hasPricingData && /price|fare|cost/i.test(cleanMessage)) {
-      groqTeamMessage =
-        "I don’t have verified pricing data for that route yet, so use manual distance or a confirmed market price before quoting the customer.";
-    }
-
     let aiResult = {};
 
-    if (!groqTeamMessage) {
+    if (!forcedMessage) {
       const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -301,12 +492,21 @@ Return exactly this JSON structure:
                 senderName,
                 senderRole,
                 user_message: cleanMessage,
-                zachangu_context: zachanguContext
+                zachangu_context: {
+                  zones: context.zones,
+                  landmarks: context.landmarks,
+                  pricing_rules: context.pricing_rules,
+                  market_prices: context.market_prices,
+                  route_matrix: context.route_matrix,
+                  risks: context.risks
+                },
+                computed_fare: computedFare
               })
             }
           ],
           response_format: { type: "json_object" },
-          temperature: 0.15
+          temperature: 0.15,
+          max_tokens: 500
         })
       });
 
@@ -340,43 +540,50 @@ Return exactly this JSON structure:
     let category = aiResult.category || "general_update";
 
     if (!allowedCategories.includes(category)) {
-      const lowerMessage = cleanMessage.toLowerCase();
-      if (lowerMessage.includes("price") || lowerMessage.includes("fare") || lowerMessage.includes("cost")) {
-        category = "pricing_issue";
-      } else if (lowerMessage.includes("robbed") || lowerMessage.includes("accident") || lowerMessage.includes("threat")) {
-        category = "incident";
-      } else if (lowerMessage.includes("driver")) {
-        category = "driver_issue";
-      } else if (lowerMessage.includes("traffic") || lowerMessage.includes("rain") || lowerMessage.includes("roadblock")) {
-        category = "traffic";
-      } else {
-        category = "general_update";
-      }
+      const lower = cleanMessage.toLowerCase();
+
+      if (/price|fare|cost|charge|quote/.test(lower)) category = "pricing_issue";
+      else if (/robbed|accident|threat|violence|attack|stolen/.test(lower)) category = "incident";
+      else if (/driver/.test(lower)) category = "driver_issue";
+      else if (/traffic|rain|roadblock|police|jam/.test(lower)) category = "traffic";
+      else category = "general_update";
     }
 
     let riskLevel = aiResult.risk_level || "low";
     if (!allowedRiskLevels.includes(riskLevel)) riskLevel = "low";
+
+    let fallbackMessage = "Noted team, let’s handle this calmly and keep operations moving.";
+
+    if (category === "pricing_issue") {
+      if (computedFare) {
+        fallbackMessage = `That route estimate is around MWK ${computedFare.estimated_low_mwk.toLocaleString()} to MWK ${computedFare.estimated_high_mwk.toLocaleString()}, confirm the exact pickup and traffic before quoting.`;
+      } else if (context.market_prices.length > 0) {
+        const mp = context.market_prices[0];
+        fallbackMessage = `Use around MWK ${Number(mp.Min_Price).toLocaleString()} to MWK ${Number(mp.Max_Price).toLocaleString()} as a guide for this route, then confirm with the rider before dispatch.`;
+      } else {
+        fallbackMessage =
+          "I don’t have verified pricing data for that route yet, so use manual distance or a confirmed market price before quoting the customer.";
+      }
+    }
 
     return res.json({
       ignored: false,
       category,
       risk_level: riskLevel,
       internal_summary: aiResult.internal_summary || cleanMessage,
-      team_message:
-        groqTeamMessage ||
-        aiResult.team_message ||
-        "Noted team, let’s handle this calmly and keep operations moving.",
+      team_message: forcedMessage || aiResult.team_message || fallbackMessage,
       requires_supervisor_approval:
         riskLevel === "high" || aiResult.requires_supervisor_approval === true,
       used_data: aiResult.used_data || {
-        zones: [],
-        landmarks: [],
-        pricing_rules: [],
-        market_prices: [],
-        route_matrix: []
+        zones: context.zones.map((z) => z.Zone_ID || z.Zone_Name).filter(Boolean),
+        landmarks: context.landmarks.map((l) => l.Landmark_Name).filter(Boolean),
+        pricing_rules: context.pricing_rules.map((p) => p.Vehicle_Type).filter(Boolean),
+        market_prices: context.market_prices.map((m) => m.Route_ID).filter(Boolean),
+        route_matrix: context.route_matrix.map((r) => r.Route_Key).filter(Boolean),
+        computed_fare: computedFare
       },
-      debug_data_counts: zachanguContext.data_counts,
-      debug_table_status: zachanguContext.table_status
+      debug_data_counts: context.data_counts,
+      debug_matched_counts: context.matched_counts
     });
   } catch (error) {
     return res.status(500).json({
