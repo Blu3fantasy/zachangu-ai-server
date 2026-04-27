@@ -20,7 +20,8 @@ app.get("/", (req, res) => {
     status: "Zachangu AI server is running",
     groq_ready: Boolean(GROQ_API_KEY),
     supabase_ready: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
-    supabase_url_loaded: SUPABASE_URL || null
+    supabase_url_loaded: SUPABASE_URL || null,
+    tapiwa_intelligence_ready: true
   });
 });
 
@@ -33,7 +34,14 @@ app.get("/debug-tables", async (req, res) => {
     "route_matrix",
     "risks",
     "drivers",
-    "trip_requests"
+    "trip_requests",
+    "tapiwa_system_settings",
+    "tapiwa_market_price_rules",
+    "tapiwa_route_intelligence",
+    "tapiwa_zone_behavior",
+    "tapiwa_route_learning",
+    "tapiwa_price_outcomes",
+    "tapiwa_ai_audit_logs"
   ];
 
   const result = {};
@@ -62,6 +70,14 @@ function cleanBaseUrl() {
   return String(SUPABASE_URL || "")
     .replace(/\/rest\/v1\/?$/, "")
     .replace(/\/$/, "");
+}
+
+function roundToNearest100(value) {
+  return Math.round(Number(value || 0) / 100) * 100;
+}
+
+function cleanPrice(value) {
+  return Math.max(3000, roundToNearest100(value));
 }
 
 async function supabaseFetch(table, limit = 20) {
@@ -111,6 +127,44 @@ async function supabaseFetch(table, limit = 20) {
       error: error.message
     };
     return [];
+  }
+}
+
+async function supabaseInsert(table, payload) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
+
+  const url = `${cleanBaseUrl()}/rest/v1/${table}`;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      tableDebug[table] = {
+        ok: false,
+        status: response.status,
+        insert_error: text
+      };
+      return null;
+    }
+
+    return text ? JSON.parse(text) : null;
+  } catch (error) {
+    tableDebug[table] = {
+      ok: false,
+      insert_error: error.message
+    };
+    return null;
   }
 }
 
@@ -248,6 +302,144 @@ function slimRisk(row) {
   };
 }
 
+function slimTapiwaMarketRule(row) {
+  return {
+    pickup_zone: row.pickup_zone,
+    dropoff_zone: row.dropoff_zone,
+    pickup_landmark: row.pickup_landmark,
+    dropoff_landmark: row.dropoff_landmark,
+    vehicle_type: row.vehicle_type,
+    min_price: row.min_price,
+    recommended_price: row.recommended_price,
+    max_price: row.max_price,
+    confidence: row.confidence,
+    source_type: row.source_type,
+    notes: row.notes
+  };
+}
+
+function slimTapiwaRouteIntel(row) {
+  return {
+    route_name: row.route_name,
+    pickup_landmark: row.pickup_landmark,
+    dropoff_landmark: row.dropoff_landmark,
+    pickup_zone: row.pickup_zone,
+    dropoff_zone: row.dropoff_zone,
+    distance_min_km: row.distance_min_km,
+    distance_max_km: row.distance_max_km,
+    typical_customer_type: row.typical_customer_type,
+    peak_time: row.peak_time,
+    key_concern: row.key_concern,
+    route_behavior: row.route_behavior,
+    pricing_notes: row.pricing_notes,
+    driver_notes: row.driver_notes,
+    customer_notes: row.customer_notes
+  };
+}
+
+function slimTapiwaZoneBehavior(row) {
+  return {
+    zone_code: row.zone_code,
+    zone_name: row.zone_name,
+    zone_type: row.zone_type,
+    demand_level: row.demand_level,
+    strategic_role: row.strategic_role,
+    demand_time: row.demand_time,
+    pricing_behavior: row.pricing_behavior,
+    customer_behavior: row.customer_behavior,
+    driver_behavior: row.driver_behavior,
+    risk_notes: row.risk_notes,
+    dispatcher_notes: row.dispatcher_notes
+  };
+}
+
+function slimTapiwaRouteLearning(row) {
+  return {
+    pickup_zone: row.pickup_zone,
+    dropoff_zone: row.dropoff_zone,
+    pickup_landmark: row.pickup_landmark,
+    dropoff_landmark: row.dropoff_landmark,
+    vehicle_type: row.vehicle_type,
+    trip_count: row.trip_count,
+    avg_final_price: row.avg_final_price,
+    min_final_price: row.min_final_price,
+    max_final_price: row.max_final_price,
+    most_common_price: row.most_common_price,
+    avg_tapiwa_price: row.avg_tapiwa_price,
+    avg_override_difference: row.avg_override_difference,
+    acceptance_rate: row.acceptance_rate
+  };
+}
+
+function slimTapiwaOutcome(row) {
+  return {
+    trip_request_id: row.trip_request_id,
+    tapiwa_recommended_price: row.tapiwa_recommended_price,
+    final_price: row.final_price,
+    price_difference: row.price_difference,
+    price_overridden: row.price_overridden,
+    override_reason: row.override_reason,
+    customer_accepted: row.customer_accepted,
+    driver_accepted: row.driver_accepted,
+    trip_completed: row.trip_completed,
+    created_at: row.created_at
+  };
+}
+
+async function fetchTapiwaIntelligence(userMessage) {
+  const keywords = getKeywords(userMessage);
+
+  const [
+    settingsRaw,
+    marketRulesRaw,
+    routeIntelRaw,
+    zoneBehaviorRaw,
+    routeLearningRaw,
+    priceOutcomesRaw
+  ] = await Promise.all([
+    supabaseFetch("tapiwa_system_settings", 50),
+    supabaseFetch("tapiwa_market_price_rules", 250),
+    supabaseFetch("tapiwa_route_intelligence", 250),
+    supabaseFetch("tapiwa_zone_behavior", 50),
+    supabaseFetch("tapiwa_route_learning", 150),
+    supabaseFetch("tapiwa_price_outcomes", 50)
+  ]);
+
+  const matchedMarketRules = topMatches(marketRulesRaw, keywords, 8)
+    .filter((r) => r.active !== false);
+
+  const matchedRouteIntel = topMatches(routeIntelRaw, keywords, 8)
+    .filter((r) => r.active !== false);
+
+  const matchedZoneBehavior = topMatches(zoneBehaviorRaw, keywords, 6)
+    .filter((r) => r.active !== false);
+
+  const matchedRouteLearning = topMatches(routeLearningRaw, keywords, 8);
+
+  return {
+    system_settings: settingsRaw,
+    market_price_rules: matchedMarketRules.map(slimTapiwaMarketRule),
+    route_intelligence: matchedRouteIntel.map(slimTapiwaRouteIntel),
+    zone_behavior: matchedZoneBehavior.map(slimTapiwaZoneBehavior),
+    route_learning: matchedRouteLearning.map(slimTapiwaRouteLearning),
+    recent_price_outcomes: priceOutcomesRaw.slice(0, 10).map(slimTapiwaOutcome),
+    data_counts: {
+      tapiwa_system_settings: settingsRaw.length,
+      tapiwa_market_price_rules: marketRulesRaw.length,
+      tapiwa_route_intelligence: routeIntelRaw.length,
+      tapiwa_zone_behavior: zoneBehaviorRaw.length,
+      tapiwa_route_learning: routeLearningRaw.length,
+      tapiwa_price_outcomes: priceOutcomesRaw.length
+    },
+    matched_counts: {
+      market_price_rules: matchedMarketRules.length,
+      route_intelligence: matchedRouteIntel.length,
+      zone_behavior: matchedZoneBehavior.length,
+      route_learning: matchedRouteLearning.length
+    }
+  };
+}
+
 async function fetchZachanguContext(userMessage) {
   const keywords = getKeywords(userMessage);
 
@@ -257,14 +449,16 @@ async function fetchZachanguContext(userMessage) {
     pricingRulesRaw,
     marketPricesRaw,
     routeMatrixRaw,
-    risksRaw
+    risksRaw,
+    tapiwaIntelligence
   ] = await Promise.all([
     supabaseFetch("zones", 60),
     supabaseFetch("landmarks", 250),
     supabaseFetch("pricing_rules", 30),
     supabaseFetch("market_prices", 150),
     supabaseFetch("route_matrix", 250),
-    supabaseFetch("risks", 80)
+    supabaseFetch("risks", 80),
+    fetchTapiwaIntelligence(userMessage)
   ]);
 
   const matchedLandmarks = topMatches(landmarksRaw, keywords, 8);
@@ -315,13 +509,16 @@ async function fetchZachanguContext(userMessage) {
 
     risks: matchedRisks.slice(0, 5).map(slimRisk),
 
+    tapiwa_intelligence: tapiwaIntelligence,
+
     data_counts: {
       zones: zonesRaw.length,
       landmarks: landmarksRaw.length,
       pricing_rules: pricingRulesRaw.length,
       market_prices: marketPricesRaw.length,
       route_matrix: routeMatrixRaw.length,
-      risks: risksRaw.length
+      risks: risksRaw.length,
+      ...tapiwaIntelligence.data_counts
     },
 
     matched_counts: {
@@ -329,7 +526,8 @@ async function fetchZachanguContext(userMessage) {
       landmarks: matchedLandmarks.length,
       market_prices: matchedMarketPrices.length,
       route_matrix: matchedRoutes.length,
-      risks: matchedRisks.length
+      risks: matchedRisks.length,
+      ...tapiwaIntelligence.matched_counts
     },
 
     table_status: tableDebug
@@ -337,6 +535,23 @@ async function fetchZachanguContext(userMessage) {
 }
 
 function calculateBasicFare(context) {
+  const tapiwaRule = context.tapiwa_intelligence?.market_price_rules?.[0];
+
+  if (tapiwaRule?.recommended_price) {
+    const recommended = cleanPrice(tapiwaRule.recommended_price);
+    const low = cleanPrice(tapiwaRule.min_price || recommended);
+    const high = cleanPrice(tapiwaRule.max_price || recommended);
+
+    return {
+      source: "tapiwa_market_price_rules",
+      estimated_low_mwk: Math.min(low, high),
+      estimated_high_mwk: Math.max(low, high),
+      recommended_mwk: recommended,
+      confidence: tapiwaRule.confidence || "medium",
+      route_used: `${tapiwaRule.pickup_landmark || "Unknown"} → ${tapiwaRule.dropoff_landmark || "Unknown"}`
+    };
+  }
+
   const route = context.route_matrix?.[0];
   const rule =
     context.pricing_rules?.find((r) =>
@@ -349,28 +564,53 @@ function calculateBasicFare(context) {
 
   const distance = Number(route.Distance_KM);
   const rate = Number(rule.Base_Rate_Per_KM_MWK);
-  const minimum = Number(rule.Minimum_Fare_MWK || 0);
+  const minimum = Number(rule.Minimum_Fare_MWK || 3000);
 
   if (!distance || !rate) return null;
 
   const rawFare = distance * rate;
-  const baseFare = Math.max(rawFare, minimum);
+  const baseFare = Math.max(rawFare, minimum, 3000);
 
-  const low = Math.round((baseFare * 0.95) / 500) * 500;
-  const high = Math.round((baseFare * 1.08) / 500) * 500;
+  const low = cleanPrice(baseFare * 0.95);
+  const high = cleanPrice(baseFare * 1.08);
+  const recommended = cleanPrice((low + high) / 2);
 
   return {
+    source: "route_matrix_plus_pricing_rules",
     distance_km: distance,
     vehicle_type: rule.Vehicle_Type,
     base_rate_per_km: rate,
     minimum_fare: minimum,
-    estimated_low_mwk: low,
-    estimated_high_mwk: high,
+    estimated_low_mwk: Math.min(low, high),
+    estimated_high_mwk: Math.max(low, high),
+    recommended_mwk: recommended,
     route_used: `${route.From_Landmark} → ${route.To_Landmark}`
   };
 }
 
+async function saveAuditLog(payload) {
+  await supabaseInsert("tapiwa_ai_audit_logs", {
+    request_type: payload.request_type || "team_chat",
+    user_message: payload.user_message || null,
+    clean_message: payload.clean_message || null,
+    ai_category: payload.ai_category || null,
+    risk_level: payload.risk_level || null,
+    team_message: payload.team_message || null,
+    internal_summary: payload.internal_summary || null,
+    used_data: payload.used_data || null,
+    raw_ai_response: payload.raw_ai_response || null,
+    success: payload.success !== false,
+    error_message: payload.error_message || null,
+    source_type: "ai_server",
+    source_ref: "server.js"
+  });
+}
+
 app.post("/ai/analyze", async (req, res) => {
+  let cleanMessage = "";
+  let context = null;
+  let aiResult = {};
+
   try {
     const {
       message,
@@ -393,12 +633,15 @@ app.post("/ai/analyze", async (req, res) => {
       });
     }
 
-    const cleanMessage = cleanTapiwaMessage(message);
-    const context = await fetchZachanguContext(cleanMessage);
+    cleanMessage = cleanTapiwaMessage(message);
+    context = await fetchZachanguContext(cleanMessage);
     const computedFare = calculateBasicFare(context);
 
     const isPricingRequest = /price|fare|cost|charge|quote/i.test(cleanMessage);
     const hasAnyPricingData =
+      context.tapiwa_intelligence.market_price_rules.length > 0 ||
+      context.tapiwa_intelligence.route_intelligence.length > 0 ||
+      context.tapiwa_intelligence.route_learning.length > 0 ||
       context.market_prices.length > 0 ||
       context.route_matrix.length > 0 ||
       context.pricing_rules.length > 0 ||
@@ -411,26 +654,67 @@ app.post("/ai/analyze", async (req, res) => {
         "Hmm, I don't have pricing for that route yet — check the distance manually or ask someone who's done that run before quoting.";
     }
 
-    const systemPrompt = `You are Tapiwa, a real person on the Zachangu dispatch team in Lilongwe, Malawi. You help the crew with ops, pricing, and keeping things running.
+    const systemPrompt = `You are Dispatch Tapiwa, a real person on the Zachangu dispatch team in Lilongwe, Malawi.
 
-team_message is how you talk in the group chat. Write it like you are texting your workmates — not like a report, not like a robot. Short, real, human. Say things like yeah, alright, good catch, let's sort this, hold on that one. React naturally to what is happening.
+You help the crew with operations, pricing, safety, and dispatch decisions.
 
-BAD: Incident detected. Risk level: medium. Action required: notify supervisor.
-GOOD: Heeh, that does not sound right — let us pause that area and loop in the supervisor before sending anyone.
+You must sound human, calm, short, and useful. Do not sound like a report. Do not sound like a robot.
 
-BAD: Estimated fare: MWK 3,000-3,500. Confirm route before dispatch.
-GOOD: Should be somewhere around 3k to 3,500 — just confirm the pickup spot first before you quote them.
+IMPORTANT PERSONALITY:
+- You are friendly but controlled.
+- You are a teammate, not a chatbot.
+- Keep team_message short.
+- 1 to 2 sentences max.
+- No bullets in team_message.
+- No formal labels in team_message.
+- You can say: yeah, alright, good catch, let's sort this, hold on that one, noted.
 
-1-2 sentences max. No bullets. No labels. No formal tone.
-Safety: never send drivers into trouble spots. Escalate high-risk to supervisor.
-Pricing: only use numbers from computed_fare or market_prices. Never guess.
-Never take direct action — you advise, the dispatcher decides.
+PRICING RULES:
+- Minimum fare is MWK 3,000.
+- Never recommend below MWK 3,000.
+- Round prices to nearest MWK 100.
+- Never output ugly prices like MWK 8,907 or MWK 6,547.
+- Use clean prices like MWK 8,900 or MWK 6,500.
+- Prefer Tapiwa intelligence tables when available.
+- Use market_price_rules first, then route_learning, then route_intelligence, then old market_prices, then computed_fare.
+- Long trips should not scale linearly. Apply long-distance compression.
+- Dispatcher decides final price.
+- If giving price, make it conversational but still clear.
+
+GOOD PRICE STYLE:
+Should be around MWK 10,500 — this is a busy route into town, but confirm pickup before quoting.
+
+BAD PRICE STYLE:
+Estimated fare calculated from available structured data is MWK 10,476.32.
+
+SAFETY:
+- Never send drivers into danger.
+- Escalate high-risk incidents to supervisor.
+- If drunk customer, accident, violence, robbery, police conflict, refusal to pay, or danger: pause and involve supervisor.
+
 category: incident|pricing_issue|driver_issue|traffic|system_issue|general_update
 risk_level: low|medium|high
 
-JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"","requires_supervisor_approval":false,"used_data":{"zones":[],"landmarks":[],"pricing_rules":[],"market_prices":[],"route_matrix":[],"computed_fare":null}}`;
-
-    let aiResult = {};
+JSON only:
+{
+  "category":"",
+  "risk_level":"",
+  "internal_summary":"",
+  "team_message":"",
+  "requires_supervisor_approval":false,
+  "used_data":{
+    "zones":[],
+    "landmarks":[],
+    "pricing_rules":[],
+    "market_prices":[],
+    "route_matrix":[],
+    "tapiwa_market_price_rules":[],
+    "tapiwa_route_intelligence":[],
+    "tapiwa_zone_behavior":[],
+    "tapiwa_route_learning":[],
+    "computed_fare":null
+  }
+}`;
 
     if (!forcedMessage) {
       const groqResponse = await fetch(
@@ -447,7 +731,6 @@ JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"
               { role: "system", content: systemPrompt },
               {
                 role: "user",
-                // Only send what the model actually needs — drop debug counts
                 content: JSON.stringify({
                   sender: `${senderName} (${senderRole})`,
                   msg: cleanMessage,
@@ -457,7 +740,8 @@ JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"
                     pricing_rules: context.pricing_rules,
                     market_prices: context.market_prices,
                     route_matrix: context.route_matrix,
-                    risks: context.risks
+                    risks: context.risks,
+                    tapiwa_intelligence: context.tapiwa_intelligence
                   },
                   fare: computedFare
                 })
@@ -465,7 +749,7 @@ JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"
             ],
             response_format: { type: "json_object" },
             temperature: 0.2,
-            max_tokens: 350  // reduced from 500; output is small JSON
+            max_tokens: 500
           })
         }
       );
@@ -473,6 +757,15 @@ JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"
       const groqData = await groqResponse.json();
 
       if (!groqResponse.ok) {
+        await saveAuditLog({
+          request_type: "team_chat",
+          user_message: message,
+          clean_message: cleanMessage,
+          success: false,
+          error_message: "Groq API error",
+          raw_ai_response: groqData
+        });
+
         return res.status(groqResponse.status).json({
           error: "Groq API error",
           details: groqData
@@ -504,7 +797,7 @@ JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"
     if (!allowedCategories.includes(category)) {
       const lower = cleanMessage.toLowerCase();
       if (/price|fare|cost|charge|quote/.test(lower)) category = "pricing_issue";
-      else if (/robbed|accident|threat|violence|attack|stolen/.test(lower)) category = "incident";
+      else if (/robbed|accident|threat|violence|attack|stolen|drunk|refuse/.test(lower)) category = "incident";
       else if (/driver/.test(lower)) category = "driver_issue";
       else if (/traffic|rain|roadblock|police|jam/.test(lower)) category = "traffic";
       else category = "general_update";
@@ -514,21 +807,24 @@ JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"
     if (!allowedRiskLevels.includes(riskLevel)) riskLevel = "low";
 
     let fallbackMessage =
-"Alright team, noted — let's handle this and keep things moving.";
+      "Alright team, noted — let's handle this and keep things moving.";
 
     if (category === "pricing_issue") {
       if (computedFare) {
-        fallbackMessage = `Yeah should be around MWK ${computedFare.estimated_low_mwk.toLocaleString()} to ${computedFare.estimated_high_mwk.toLocaleString()} — just double-check the pickup and traffic before you tell them.`;
+        fallbackMessage = `Yeah should be around MWK ${Number(computedFare.recommended_mwk || computedFare.estimated_low_mwk).toLocaleString()} — safe range is MWK ${Number(computedFare.estimated_low_mwk).toLocaleString()} to ${Number(computedFare.estimated_high_mwk).toLocaleString()}, confirm pickup first.`;
+      } else if (context.tapiwa_intelligence.market_price_rules.length > 0) {
+        const rule = context.tapiwa_intelligence.market_price_rules[0];
+        fallbackMessage = `Should be around MWK ${Number(cleanPrice(rule.recommended_price || rule.min_price)).toLocaleString()} — keep it within MWK ${Number(cleanPrice(rule.min_price)).toLocaleString()} to ${Number(cleanPrice(rule.max_price)).toLocaleString()}.`;
       } else if (context.market_prices.length > 0) {
         const mp = context.market_prices[0];
-        fallbackMessage = `Market rate for that is around MWK ${Number(mp.Min_Price).toLocaleString()} to ${Number(mp.Max_Price).toLocaleString()} — confirm with the rider before you dispatch.`;
+        fallbackMessage = `Market rate for that is around MWK ${Number(cleanPrice(mp.Min_Price)).toLocaleString()} to MWK ${Number(cleanPrice(mp.Max_Price)).toLocaleString()} — confirm with the rider before dispatch.`;
       } else {
         fallbackMessage =
           "Hmm, I don't have pricing for that route yet — check the distance manually or ask someone who's done that run before quoting.";
       }
     }
 
-    return res.json({
+    const responsePayload = {
       ignored: false,
       category,
       risk_level: riskLevel,
@@ -542,12 +838,40 @@ JSON only: {"category":"","risk_level":"","internal_summary":"","team_message":"
         pricing_rules: context.pricing_rules.map((p) => p.Vehicle_Type).filter(Boolean),
         market_prices: context.market_prices.map((m) => m.Route_ID).filter(Boolean),
         route_matrix: context.route_matrix.map((r) => r.Route_Key).filter(Boolean),
+        tapiwa_market_price_rules: context.tapiwa_intelligence.market_price_rules.map((r) => r.pickup_landmark || r.pickup_zone).filter(Boolean),
+        tapiwa_route_intelligence: context.tapiwa_intelligence.route_intelligence.map((r) => r.route_name).filter(Boolean),
+        tapiwa_zone_behavior: context.tapiwa_intelligence.zone_behavior.map((z) => z.zone_code).filter(Boolean),
+        tapiwa_route_learning: context.tapiwa_intelligence.route_learning.map((r) => `${r.pickup_landmark} → ${r.dropoff_landmark}`).filter(Boolean),
         computed_fare: computedFare
       },
       debug_data_counts: context.data_counts,
       debug_matched_counts: context.matched_counts
+    };
+
+    await saveAuditLog({
+      request_type: "team_chat",
+      user_message: message,
+      clean_message: cleanMessage,
+      ai_category: responsePayload.category,
+      risk_level: responsePayload.risk_level,
+      team_message: responsePayload.team_message,
+      internal_summary: responsePayload.internal_summary,
+      used_data: responsePayload.used_data,
+      raw_ai_response: aiResult,
+      success: true
     });
+
+    return res.json(responsePayload);
   } catch (error) {
+    await saveAuditLog({
+      request_type: "team_chat",
+      clean_message: cleanMessage,
+      used_data: context,
+      raw_ai_response: aiResult,
+      success: false,
+      error_message: error.message
+    });
+
     return res.status(500).json({
       error: "AI server failed",
       details: error.message
