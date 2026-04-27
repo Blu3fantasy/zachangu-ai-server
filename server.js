@@ -175,7 +175,160 @@ function normalizeText(value) {
     .replace(/\s+/g, " ")
     .trim();
 }
+function levenshtein(a, b) {
+  a = normalizeText(a);
+  b = normalizeText(b);
 
+  const matrix = Array.from({ length: a.length + 1 }, () =>
+    Array(b.length + 1).fill(0)
+  );
+
+  for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
+  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  return matrix[a.length][b.length];
+}
+
+function similarity(a, b) {
+  a = normalizeText(a);
+  b = normalizeText(b);
+
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.includes(b) || b.includes(a)) return 0.88;
+
+  const distance = levenshtein(a, b);
+  const maxLength = Math.max(a.length, b.length);
+
+  return 1 - distance / maxLength;
+}
+
+function isPricingLikeMessage(message) {
+  const text = normalizeText(message);
+
+  return (
+    /price|fare|cost|charge|quote/.test(text) ||
+    /how much|hw much|hw mch|how mch|hwmuch/.test(text) ||
+    /km|kms|kilometer|kilometre|distance/.test(text) ||
+    /\bfrom\b.+\bto\b/.test(text)
+  );
+}
+
+function isCorrectionMessage(message) {
+  const text = normalizeText(message);
+
+  return (
+    /no tapiwa|not that|i meant|meant|wrong|correct|correction|not from|not to/.test(text)
+  );
+}
+
+function extractRouteParts(message) {
+  const text = normalizeText(message);
+
+  let match = text.match(/from (.+?) to (.+)/);
+  if (match) {
+    return {
+      pickupRaw: match[1].trim(),
+      dropoffRaw: match[2].trim()
+    };
+  }
+
+  match = text.match(/(.+?) to (.+)/);
+  if (match && isPricingLikeMessage(text)) {
+    return {
+      pickupRaw: match[1]
+        .replace(/price|fare|cost|charge|quote|how much|hw much|hw mch|how mch|km|kms|kilometer|kilometre|distance/g, "")
+        .trim(),
+      dropoffRaw: match[2].trim()
+    };
+  }
+
+  return null;
+}
+
+function bestLandmarkMatch(rawName, landmarks) {
+  if (!rawName || !Array.isArray(landmarks)) {
+    return { match: null, score: 0 };
+  }
+
+  const candidates = landmarks.map((lm) => {
+    const names = [
+      lm.Landmark_Name,
+      lm.Area,
+      lm.Nearby_Landmarks
+    ].filter(Boolean);
+
+    let bestScore = 0;
+
+    for (const name of names) {
+      const score = similarity(rawName, name);
+      if (score > bestScore) bestScore = score;
+    }
+
+    return {
+      landmark: lm,
+      score: bestScore
+    };
+  });
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  return {
+    match: candidates[0]?.landmark || null,
+    score: candidates[0]?.score || 0
+  };
+}
+
+function buildRouteUnderstanding(message, landmarksRaw) {
+  const parts = extractRouteParts(message);
+
+  if (!parts) {
+    return {
+      hasRoute: false,
+      confidence: "low",
+      pickup: null,
+      dropoff: null,
+      note: "No clear pickup/dropoff detected."
+    };
+  }
+
+  const pickupMatch = bestLandmarkMatch(parts.pickupRaw, landmarksRaw);
+  const dropoffMatch = bestLandmarkMatch(parts.dropoffRaw, landmarksRaw);
+
+  const avgScore = (pickupMatch.score + dropoffMatch.score) / 2;
+
+  let confidence = "low";
+  if (avgScore >= 0.78) confidence = "high";
+  else if (avgScore >= 0.55) confidence = "medium";
+
+  return {
+    hasRoute: true,
+    confidence,
+    pickupRaw: parts.pickupRaw,
+    dropoffRaw: parts.dropoffRaw,
+    pickup: pickupMatch.match,
+    dropoff: dropoffMatch.match,
+    pickup_score: pickupMatch.score,
+    dropoff_score: dropoffMatch.score,
+    note:
+      confidence === "high"
+        ? "Route understood clearly."
+        : confidence === "medium"
+        ? "Route partly understood; needs confirmation."
+        : "Route unclear; ask for clarification."
+  };
+}
 function getKeywords(message) {
   const stopWords = new Set([
     "price",
@@ -462,6 +615,7 @@ async function fetchZachanguContext(userMessage) {
   ]);
 
   const matchedLandmarks = topMatches(landmarksRaw, keywords, 8);
+  const routeUnderstanding = buildRouteUnderstanding(userMessage, landmarksRaw);
   const matchedZones = topMatches(zonesRaw, keywords, 6);
   const matchedMarketPrices = topMatches(marketPricesRaw, keywords, 8);
   const matchedRoutes = topMatches(routeMatrixRaw, keywords, 8);
@@ -489,8 +643,9 @@ async function fetchZachanguContext(userMessage) {
     .filter((rule) => String(rule.Active || "").toLowerCase() === "yes")
     .slice(0, 6);
 
-  return {
-    request_keywords: keywords.slice(0, 12),
+return {
+  request_keywords: keywords.slice(0, 12),
+  route_understanding: routeUnderstanding,
 
     zones: [...matchedZones, ...relevantZones]
       .filter((v, i, arr) => arr.findIndex((x) => x.Zone_ID === v.Zone_ID) === i)
@@ -637,7 +792,8 @@ app.post("/ai/analyze", async (req, res) => {
     context = await fetchZachanguContext(cleanMessage);
     const computedFare = calculateBasicFare(context);
 
-    const isPricingRequest = /price|fare|cost|charge|quote/i.test(cleanMessage);
+const isPricingRequest = isPricingLikeMessage(cleanMessage);
+const isCorrection = isCorrectionMessage(cleanMessage);
     const hasAnyPricingData =
       context.tapiwa_intelligence.market_price_rules.length > 0 ||
       context.tapiwa_intelligence.route_intelligence.length > 0 ||
@@ -686,7 +842,14 @@ Should be around MWK 10,500 — this is a busy route into town, but confirm pick
 
 BAD PRICE STYLE:
 Estimated fare calculated from available structured data is MWK 10,476.32.
-
+MESSY TEXT UNDERSTANDING:
+- Dispatchers may type badly, misspell words, or write incomplete route names.
+- Try to understand messy messages like "hw much biwi wakawaka" or "price frm area25 town".
+- If route_understanding.confidence is high, answer normally.
+- If route_understanding.confidence is medium, say "I think you mean X to Y" and ask for confirmation or give a cautious estimate.
+- If route_understanding.confidence is low, do not guess. Ask the dispatcher to clarify pickup and drop-off.
+- If dispatcher corrects you, accept correction calmly and use the corrected route.
+- Never pretend to know a route you do not understand.
 SAFETY:
 - Never send drivers into danger.
 - Escalate high-risk incidents to supervisor.
@@ -734,7 +897,7 @@ JSON only:
                 content: JSON.stringify({
                   sender: `${senderName} (${senderRole})`,
                   msg: cleanMessage,
-                  ctx: {
+                  ctx: {route_understanding: context.route_understanding,
                     zones: context.zones,
                     landmarks: context.landmarks,
                     pricing_rules: context.pricing_rules,
@@ -810,6 +973,25 @@ JSON only:
       "Alright team, noted — let's handle this and keep things moving.";
 
     if (category === "pricing_issue") {
+            const routeUnderstanding = context.route_understanding;
+
+      if (
+        routeUnderstanding?.hasRoute &&
+        routeUnderstanding.confidence === "low"
+      ) {
+        fallbackMessage =
+          "I can’t lock that route yet — send pickup and drop-off clearly.";
+      } else if (
+        routeUnderstanding?.hasRoute &&
+        routeUnderstanding.confidence === "medium"
+      ) {
+        const pickupName =
+          routeUnderstanding.pickup?.Landmark_Name || routeUnderstanding.pickupRaw;
+        const dropoffName =
+          routeUnderstanding.dropoff?.Landmark_Name || routeUnderstanding.dropoffRaw;
+
+        fallbackMessage = `I think you mean ${pickupName} to ${dropoffName} — confirm that route before I quote it.`;
+      } else
       if (computedFare) {
         fallbackMessage = `Yeah should be around MWK ${Number(computedFare.recommended_mwk || computedFare.estimated_low_mwk).toLocaleString()} — safe range is MWK ${Number(computedFare.estimated_low_mwk).toLocaleString()} to ${Number(computedFare.estimated_high_mwk).toLocaleString()}, confirm pickup first.`;
       } else if (context.tapiwa_intelligence.market_price_rules.length > 0) {
