@@ -5,13 +5,12 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
-const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_URL = process.env.SUPABASE_URL; // e.g. https://xxxxx.supabase.co
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 app.get("/", (req, res) => {
@@ -21,6 +20,8 @@ app.get("/", (req, res) => {
     supabase_ready: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   });
 });
+
+/* ---------- Helpers ---------- */
 
 function hasTapiwaCall(message) {
   return /@tapiwa/i.test(message || "");
@@ -45,162 +46,89 @@ async function supabaseFetch(table, limit = 50) {
     });
 
     if (!response.ok) {
-      console.warn(`Supabase fetch failed for ${table}:`, await response.text());
+      console.warn(`Supabase ${table} error:`, await response.text());
       return [];
     }
 
     return await response.json();
-  } catch (error) {
-    console.warn(`Supabase error for ${table}:`, error.message);
+  } catch (err) {
+    console.warn(`Supabase ${table} fetch failed:`, err.message);
     return [];
   }
 }
 
-async function fetchZachanguContext(userMessage) {
-  const searchText = String(userMessage || "").toLowerCase();
+async function fetchContext(userMessage) {
+  const text = userMessage.toLowerCase();
 
-  const [
-    zones,
-    allLandmarks,
-    pricingRules,
-    marketPrices,
-    routeMatrix,
-    risks
-  ] = await Promise.all([
+  const [zones, landmarks, pricing, market, routes] = await Promise.all([
     supabaseFetch("zones", 20),
     supabaseFetch("landmarks", 100),
     supabaseFetch("pricing_rules", 50),
     supabaseFetch("market_prices", 80),
-    supabaseFetch("route_matrix", 100),
-    supabaseFetch("risks", 50)
+    supabaseFetch("route_matrix", 100)
   ]);
 
-  const matchedLandmarks = allLandmarks.filter((lm) => {
-    const values = [
-      lm.name,
-      lm.landmark_name,
-      lm.area,
-      lm.location_area,
-      lm.zone_code,
-      lm.zone_id
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-
-    return values && searchText.split(/\s+/).some((word) => word.length > 2 && values.includes(word));
+  // simple match for relevant landmarks
+  const matchedLandmarks = landmarks.filter((l) => {
+    const s = `${l.name || ""} ${l.area || ""} ${l.zone_code || ""}`.toLowerCase();
+    return text.split(" ").some((w) => w.length > 2 && s.includes(w));
   });
 
   return {
     zones,
-    landmarks: matchedLandmarks.length ? matchedLandmarks.slice(0, 30) : allLandmarks.slice(0, 30),
-    pricing_rules: pricingRules,
-    market_prices: marketPrices,
-    route_matrix: routeMatrix,
-    risks
+    landmarks: matchedLandmarks.length ? matchedLandmarks.slice(0, 20) : landmarks.slice(0, 20),
+    pricing_rules: pricing,
+    market_prices: market,
+    route_matrix: routes
   };
 }
 
+/* ---------- AI Endpoint ---------- */
+
 app.post("/ai/analyze", async (req, res) => {
   try {
-    const {
-      message,
-      senderName = "Unknown",
-      senderRole = "Dispatcher"
-    } = req.body || {};
+    const { message, senderName = "Dispatcher", senderRole = "Dispatcher" } = req.body || {};
 
-    if (!message || !String(message).trim()) {
-      return res.status(400).json({ error: "Message is required" });
-    }
-
-    if (!GROQ_API_KEY) {
-      return res.status(500).json({ error: "Missing GROQ_API_KEY in Railway variables" });
+    if (!message) {
+      return res.status(400).json({ error: "Message required" });
     }
 
     if (!hasTapiwaCall(message)) {
-      return res.json({
-        ignored: true,
-        reason: "Tapiwa was not mentioned. Use @Tapiwa to call the AI."
-      });
+      return res.json({ ignored: true });
     }
 
     const cleanMessage = cleanTapiwaMessage(message);
-    const zachanguContext = await fetchZachanguContext(cleanMessage);
+    const context = await fetchContext(cleanMessage);
 
     const systemPrompt = `
-You are Tapiwa Ops AI for Zachangu Commuters Limited, a ride-hailing and dispatch operation in Malawi.
+You are Tapiwa Ops AI for Zachangu.
 
-You only respond when called with @Tapiwa.
+Speak like a calm team leader in a WhatsApp-style chat.
 
-You support the dispatch team like a calm team leader.
-You are not a robot report system.
+RULES:
+- One natural message only (max 2 short sentences)
+- No labels, no bullets, no robotic tone
+- Be practical and human
+- If safety issue → calm but firm
+- If pricing → use context if available, otherwise estimate
 
-STYLE:
-- Speak naturally, like someone in the operations team.
-- Sound calm, helpful, and confident.
-- Keep team_message as ONE natural message.
-- One sentence is best. Two short sentences maximum.
-- No bullets inside team_message.
-- No labels inside team_message.
-- No scary wording unless there is real danger.
-- Do not shame, blame, or intimidate anyone.
-- Avoid robotic phrases like "risk level", "category", "incident detected", "action required".
+Never:
+- Suggest security teams
+- Send drivers into unsafe areas
+- Pretend certainty without data
 
-WHAT YOU CAN HELP WITH:
-- pricing guidance
-- route/zone guidance
-- incident handling
-- dispatcher procedures
-- safety guidance
-- driver/customer disputes
-- operations updates
-
-CLASSIFY MESSAGES INTO:
-incident, pricing_issue, driver_issue, traffic, system_issue, general_update
-
-REAL-WORLD ZACHANGU RULES:
-- Zachangu does NOT have security teams or enforcement units.
-- Never suggest sending security teams.
-- Never suggest sending drivers into unsafe areas.
-- Never suggest unrealistic actions.
-- For robbery, violence, serious threats, or accidents, prioritize safety first.
-- For unsafe locations, recommend pausing assignments in that area until supervisor clearance.
-- High-risk issues must require supervisor approval.
-- Do not approve, cancel, assign drivers, block customers, change prices, or edit trips directly.
-- Only recommend safe next steps.
-
-PRICING RULES:
-- Use Zachangu data provided in context first.
-- If exact route data exists, use it.
-- If only nearby landmarks or zones exist, say it is an estimate.
-- Do not pretend certainty where data is incomplete.
-- If pricing data is missing, recommend dispatcher confirmation using market price or manual distance.
-- Keep pricing advice practical and short.
-
-OUTPUT RULES:
-Return JSON only.
-Do not include markdown.
-Do not include explanations outside JSON.
-
-Return exactly this JSON structure:
+Return JSON:
 
 {
   "category": "",
   "risk_level": "low | medium | high",
   "internal_summary": "",
   "team_message": "",
-  "requires_supervisor_approval": true,
-  "used_data": {
-    "zones": [],
-    "landmarks": [],
-    "pricing_rules": [],
-    "market_prices": [],
-    "route_matrix": []
-  }
+  "requires_supervisor_approval": true
 }
 `;
 
-    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${GROQ_API_KEY}`,
@@ -215,47 +143,41 @@ Return exactly this JSON structure:
             content: JSON.stringify({
               senderName,
               senderRole,
-              user_message: cleanMessage,
-              zachangu_context: zachanguContext
+              message: cleanMessage,
+              context
             })
           }
         ],
         response_format: { type: "json_object" },
-        temperature: 0.25
+        temperature: 0.3
       })
     });
 
-    const groqData = await groqResponse.json();
+    const data = await groqRes.json();
 
-    if (!groqResponse.ok) {
-      return res.status(groqResponse.status).json({
-        error: "Groq API error",
-        details: groqData
-      });
+    if (!groqRes.ok) {
+      return res.status(500).json({ error: "Groq failed", details: data });
     }
 
-    const aiResult = JSON.parse(groqData.choices[0].message.content);
+    const ai = JSON.parse(data.choices[0].message.content);
 
     return res.json({
       ignored: false,
-      category: aiResult.category || "general_update",
-      risk_level: aiResult.risk_level || "low",
-      internal_summary: aiResult.internal_summary || cleanMessage,
-      team_message: aiResult.team_message || "Noted team, let’s handle this calmly and keep operations moving.",
-      requires_supervisor_approval: aiResult.requires_supervisor_approval === true,
-      used_data: aiResult.used_data || {}
+      category: ai.category || "general_update",
+      risk_level: ai.risk_level || "low",
+      internal_summary: ai.internal_summary || cleanMessage,
+      team_message: ai.team_message || "Noted team, let’s handle this calmly.",
+      requires_supervisor_approval: ai.requires_supervisor_approval === true
     });
 
-  } catch (error) {
-    return res.status(500).json({
-      error: "AI server failed",
-      details: error.message
-    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
-const port = process.env.PORT || 3001;
+/* ---------- Start Server ---------- */
 
+const port = process.env.PORT || 3001;
 app.listen(port, "0.0.0.0", () => {
-  console.log(`Zachangu AI server running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
