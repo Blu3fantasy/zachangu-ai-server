@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
@@ -10,13 +9,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 app.get("/", (req, res) => {
-  res.json({ status: "Zachangu AI server is running" });
+  res.json({
+    status: "Zachangu AI server is running",
+    groq_ready: Boolean(GROQ_API_KEY),
+    supabase_ready: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
+  });
 });
 
 function hasTapiwaCall(message) {
@@ -24,70 +27,78 @@ function hasTapiwaCall(message) {
 }
 
 function cleanTapiwaMessage(message) {
-  return (message || "").replace(/@tapiwa/gi, "").trim();
+  return String(message || "").replace(/@tapiwa/gi, "").trim();
+}
+
+async function supabaseFetch(table, limit = 50) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return [];
+
+  const url = `${SUPABASE_URL}/rest/v1/${table}?select=*&limit=${limit}`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      console.warn(`Supabase fetch failed for ${table}:`, await response.text());
+      return [];
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.warn(`Supabase error for ${table}:`, error.message);
+    return [];
+  }
 }
 
 async function fetchZachanguContext(userMessage) {
-  const searchText = userMessage.toLowerCase();
+  const searchText = String(userMessage || "").toLowerCase();
 
-  const context = {
-    zones: [],
-    landmarks: [],
-    pricing_rules: [],
-    market_prices: [],
-    route_matrix: [],
-    risks: []
+  const [
+    zones,
+    allLandmarks,
+    pricingRules,
+    marketPrices,
+    routeMatrix,
+    risks
+  ] = await Promise.all([
+    supabaseFetch("zones", 20),
+    supabaseFetch("landmarks", 100),
+    supabaseFetch("pricing_rules", 50),
+    supabaseFetch("market_prices", 80),
+    supabaseFetch("route_matrix", 100),
+    supabaseFetch("risks", 50)
+  ]);
+
+  const matchedLandmarks = allLandmarks.filter((lm) => {
+    const values = [
+      lm.name,
+      lm.landmark_name,
+      lm.area,
+      lm.location_area,
+      lm.zone_code,
+      lm.zone_id
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return values && searchText.split(/\s+/).some((word) => word.length > 2 && values.includes(word));
+  });
+
+  return {
+    zones,
+    landmarks: matchedLandmarks.length ? matchedLandmarks.slice(0, 30) : allLandmarks.slice(0, 30),
+    pricing_rules: pricingRules,
+    market_prices: marketPrices,
+    route_matrix: routeMatrix,
+    risks
   };
-
-  try {
-    const [
-      zonesResult,
-      landmarksResult,
-      pricingResult,
-      marketPricesResult,
-      routeMatrixResult,
-      risksResult
-    ] = await Promise.all([
-      supabase.from("zones").select("*").limit(20),
-      supabase.from("landmarks").select("*").limit(80),
-      supabase.from("pricing_rules").select("*").limit(30),
-      supabase.from("market_prices").select("*").limit(50),
-      supabase.from("route_matrix").select("*").limit(80),
-      supabase.from("risks").select("*").limit(40)
-    ]);
-
-    context.zones = zonesResult.data || [];
-    context.pricing_rules = pricingResult.data || [];
-    context.market_prices = marketPricesResult.data || [];
-    context.route_matrix = routeMatrixResult.data || [];
-    context.risks = risksResult.data || [];
-
-    const allLandmarks = landmarksResult.data || [];
-
-    context.landmarks = allLandmarks.filter((lm) => {
-      const name = String(lm.name || lm.landmark_name || "").toLowerCase();
-      const area = String(lm.area || lm.location_area || "").toLowerCase();
-      const zone = String(lm.zone_code || lm.zone_id || "").toLowerCase();
-
-      return (
-        searchText.includes(name) ||
-        name.includes(searchText) ||
-        searchText.includes(area) ||
-        searchText.includes(zone)
-      );
-    });
-
-    if (context.landmarks.length === 0) {
-      context.landmarks = allLandmarks.slice(0, 30);
-    }
-
-    return context;
-  } catch (error) {
-    return {
-      ...context,
-      context_error: error.message
-    };
-  }
 }
 
 app.post("/ai/analyze", async (req, res) => {
@@ -96,10 +107,14 @@ app.post("/ai/analyze", async (req, res) => {
       message,
       senderName = "Unknown",
       senderRole = "Dispatcher"
-    } = req.body;
+    } = req.body || {};
 
-    if (!message || !message.trim()) {
+    if (!message || !String(message).trim()) {
       return res.status(400).json({ error: "Message is required" });
+    }
+
+    if (!GROQ_API_KEY) {
+      return res.status(500).json({ error: "Missing GROQ_API_KEY in Railway variables" });
     }
 
     if (!hasTapiwaCall(message)) {
@@ -183,26 +198,16 @@ Return exactly this JSON structure:
     "route_matrix": []
   }
 }
-
-FIELD RULES:
-- category must be one of: incident, pricing_issue, driver_issue, traffic, system_issue, general_update
-- risk_level must be one of: low, medium, high
-- internal_summary is for system logs only; keep it short and factual.
-- team_message is what the team sees in chat.
-- team_message must be a single natural chat message with all guidance included.
-- team_message must not mention category, risk_level, internal_summary, or JSON.
-- requires_supervisor_approval must be true for high-risk issues and false for low-risk normal updates.
-- used_data should list short names/ids of data used, not full database rows.
 `;
 
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+        Authorization: `Bearer ${GROQ_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+        model: GROQ_MODEL,
         messages: [
           { role: "system", content: systemPrompt },
           {
@@ -220,32 +225,29 @@ FIELD RULES:
       })
     });
 
-    const data = await response.json();
+    const groqData = await groqResponse.json();
 
-    if (!response.ok) {
-      return res.status(response.status).json({
+    if (!groqResponse.ok) {
+      return res.status(groqResponse.status).json({
         error: "Groq API error",
-        details: data
+        details: groqData
       });
     }
 
-    const aiResult = JSON.parse(data.choices[0].message.content);
+    const aiResult = JSON.parse(groqData.choices[0].message.content);
 
-    res.json({
+    return res.json({
       ignored: false,
       category: aiResult.category || "general_update",
       risk_level: aiResult.risk_level || "low",
       internal_summary: aiResult.internal_summary || cleanMessage,
-      team_message:
-        aiResult.team_message ||
-        "Noted team, let’s keep this in view and handle it calmly.",
-      requires_supervisor_approval:
-        aiResult.requires_supervisor_approval === true,
+      team_message: aiResult.team_message || "Noted team, let’s handle this calmly and keep operations moving.",
+      requires_supervisor_approval: aiResult.requires_supervisor_approval === true,
       used_data: aiResult.used_data || {}
     });
 
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       error: "AI server failed",
       details: error.message
     });
