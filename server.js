@@ -12,6 +12,8 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON || "";
+const SUPABASE_API_KEY = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
 
 const tableDebug = {};
 const conversationMemory = new Map();
@@ -20,7 +22,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "Zachangu AI server is running",
     groq_ready: Boolean(GROQ_API_KEY),
-    supabase_ready: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
+    supabase_ready: Boolean(SUPABASE_URL && SUPABASE_API_KEY),
     supabase_url_loaded: SUPABASE_URL || null,
     tapiwa_intelligence_ready: true
   });
@@ -81,6 +83,18 @@ function cleanPrice(value) {
   return Math.max(3000, roundToNearest100(value));
 }
 
+function buildTemporaryTapiwaFallback() {
+  return {
+    ignored: false,
+    category: "system_issue",
+    risk_level: "low",
+    internal_summary: "Temporary system issue",
+    team_message: "Hmm, something went off on my side — try that again.",
+    requires_supervisor_approval: false,
+    used_data: {}
+  };
+}
+
 function buildSessionId({ sessionId, senderName, senderRole }) {
   return String(
     sessionId || `${senderRole || "Dispatcher"}:${senderName || "unknown"}`
@@ -93,6 +107,7 @@ function getConversationMemory(sessionId) {
       lastRoute: null,
       pendingConfirmation: false,
       confirmedRoute: null,
+      lastAssistTopic: null,
       updatedAt: Date.now()
     });
   }
@@ -105,6 +120,7 @@ function saveConversationMemory(sessionId, memory) {
     lastRoute: memory.lastRoute || null,
     pendingConfirmation: Boolean(memory.pendingConfirmation),
     confirmedRoute: memory.confirmedRoute || null,
+    lastAssistTopic: memory.lastAssistTopic || null,
     updatedAt: Date.now()
   });
 }
@@ -119,9 +135,23 @@ function normalizeText(value) {
 
 function isAffirmationMessage(message) {
   const text = normalizeText(message);
-  return /^(yes|ya|yeah|yep|correct|confirmed|that one|that route|ok|okay|alright|right)$/i.test(
+  return /^(yes|ya|yeah|yep|correct|confirmed|that one|that route|ok|okay|alright|right|exactly|true)$/i.test(
     text
   );
+}
+
+function sanitizeRouteFragment(value) {
+  return String(value || "")
+    .replace(/@tapiwa/gi, " ")
+    .replace(/\btapiwa\b/gi, " ")
+    .replace(/\b(no|not that|wrong route|correction|i meant|meant)\b/gi, " ")
+    .replace(/\?/g, " ")
+    .replace(
+      /\b(price|fare|cost|charge|quote|how much|hw much|hw mch|how mch|hwmuch|km|kms|kilometer|kilometre|distance|confirm|exactly|yes|please|trip|route)\b/gi,
+      " "
+    )
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isFollowUpRouteMessage(message) {
@@ -144,21 +174,16 @@ function extractRouteParts(message) {
   let match = text.match(/from (.+?) to (.+)/);
   if (match) {
     return {
-      pickupRaw: match[1].trim(),
-      dropoffRaw: match[2].trim()
+      pickupRaw: sanitizeRouteFragment(match[1]),
+      dropoffRaw: sanitizeRouteFragment(match[2])
     };
   }
 
   match = text.match(/(.+?) to (.+)/);
-  if (match && isPricingLikeMessage(text)) {
+  if (match && (isPricingLikeMessage(text) || isCorrectionMessage(text))) {
     return {
-      pickupRaw: match[1]
-        .replace(
-          /price|fare|cost|charge|quote|how much|hw much|hw mch|how mch|km|kms|kilometer|kilometre|distance/g,
-          ""
-        )
-        .trim(),
-      dropoffRaw: match[2].trim()
+      pickupRaw: sanitizeRouteFragment(match[1]),
+      dropoffRaw: sanitizeRouteFragment(match[2])
     };
   }
 
@@ -190,7 +215,9 @@ function routeSnapshotFromUnderstanding(routeUnderstanding) {
 
 function routeToLookupMessage(route) {
   if (!route) return "";
-  return `${route.pickupRaw} to ${route.dropoffRaw}`;
+  const pickup = route.pickupRaw || route.pickup || "";
+  const dropoff = route.dropoffRaw || route.dropoff || "";
+  return `from ${pickup} to ${dropoff}`.trim();
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
@@ -208,10 +235,10 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 }
 
 async function supabaseFetch(table, limit = 20) {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  if (!SUPABASE_URL || !SUPABASE_API_KEY) {
     tableDebug[table] = {
       ok: false,
-      reason: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"
+      reason: "Missing SUPABASE_URL or Supabase API key"
     };
     return [];
   }
@@ -224,8 +251,8 @@ async function supabaseFetch(table, limit = 20) {
       {
         method: "GET",
         headers: {
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          apikey: SUPABASE_API_KEY,
+          Authorization: `Bearer ${SUPABASE_API_KEY}`,
           "Content-Type": "application/json"
         }
       },
@@ -262,7 +289,7 @@ async function supabaseFetch(table, limit = 20) {
 }
 
 async function supabaseInsert(table, payload) {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
+  if (!SUPABASE_URL || !SUPABASE_API_KEY) return null;
 
   const url = `${cleanBaseUrl()}/rest/v1/${table}`;
 
@@ -272,8 +299,8 @@ async function supabaseInsert(table, payload) {
       {
         method: "POST",
         headers: {
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          apikey: SUPABASE_API_KEY,
+          Authorization: `Bearer ${SUPABASE_API_KEY}`,
           "Content-Type": "application/json",
           Prefer: "return=representation"
         },
@@ -361,32 +388,424 @@ function isCorrectionMessage(message) {
   );
 }
 
-function bestLandmarkMatch(rawName, landmarks) {
-  if (!rawName || !Array.isArray(landmarks)) {
-    return { match: null, score: 0 };
+function isHelpGuidanceMessage(message) {
+  const text = normalizeText(message);
+  return (
+    /start guiding me/.test(text) ||
+    /guide me/.test(text) ||
+    /create a trip/.test(text) ||
+    /how can i create a trip/.test(text) ||
+    /how do i create a trip/.test(text) ||
+    /is this working/.test(text) ||
+    /where do i click/.test(text) ||
+    /how do i/.test(text) ||
+    (/see driver/.test(text) && !/send driver/.test(text)) ||
+    /view driver/.test(text)
+  );
+}
+
+function isOffTopicMessage(message) {
+  const text = normalizeText(message);
+  return /weather|temperature|sunny|rain today/.test(text);
+}
+
+function hasDispatchIntent(message) {
+  const text = normalizeText(message);
+  return (
+    /send driver|send car|dispatch|driver sent|need driver|need car|car come|snd drver|snd driver|send drver/.test(text) ||
+    /tumizani driver|tumizani galimoto/.test(text) ||
+    (/drver|driver|car/.test(text) &&
+      (/send|snd|where is|cust|customer|wants to go|pickup|dispatch/.test(text)))
+  );
+}
+
+function hasUrgencyTone(message) {
+  const text = normalizeText(message);
+  return /asap|hurry|urgent|now|pls pls|waiting long|waitng long/.test(text);
+}
+
+function hasUncertaintyMarkers(message) {
+  const text = normalizeText(message);
+  return /i think|maybe|not sure|somewhere|pafupi|near|maybe it s|if possible/.test(text);
+}
+
+function compactLocation(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function extractDispatchHints(message) {
+  const raw = String(message || "");
+  const text = normalizeText(message);
+
+  const toMatch =
+    raw.match(/\bto\s+([A-Za-z0-9\s'\/-]+?)(?:\s+(?:the customer|customer|near|pafupi|maybe|i think|and|but|he wants|she wants|asap|pls|please|$))/i) ||
+    raw.match(/\b2\s+([A-Za-z0-9\s'\/-]+?)(?:\s+(?:asap|cust|customer|$))/i) ||
+    raw.match(/\bku\s+([A-Za-z0-9\s'\/-]+?)(?:,|\s+customer|\s+ali|\s+pafupi|\s+pa\s+stage|$)/i);
+  const pickupMatch =
+    raw.match(/\bat\s+([A-Za-z0-9\s'\/-]+?)(?:\s+(?:and|near|customer|he wants|she wants|$))/i) ||
+    raw.match(/\bpa\s+([A-Za-z0-9\s'\/-]+?)(?:\s+(?:pafupi|near|customer|$))/i);
+  const nearMatch =
+    raw.match(/\bnear\s+([A-Za-z0-9\s'\/-]+?)(?:\s+(?:i think|maybe|$))/i) ||
+    raw.match(/\bpafupi\s+ndi\s+([A-Za-z0-9\s'\/-]+?)(?:\s|$)/i);
+  const wantsToMatch = raw.match(/\bwants?\s+to\s+go\s+to\s+([A-Za-z0-9\s'\/-]+?)(?:\s+(?:but|and|$))/i);
+
+  return {
+    destination: compactLocation(toMatch?.[1] || ""),
+    pickup: compactLocation(pickupMatch?.[1] || ""),
+    nearby: compactLocation(nearMatch?.[1] || ""),
+    dropoff: compactLocation(wantsToMatch?.[1] || "")
+  };
+}
+
+function buildDeterministicDispatchReply(cleanMessage, memory) {
+  const text = normalizeText(cleanMessage);
+
+  if (text === "start guiding me") {
+    if (memory) memory.lastAssistTopic = "general_onboarding";
+    return {
+      category: "general_update",
+      risk_level: "low",
+      internal_summary: "Started dispatcher onboarding guidance",
+      team_message:
+        "I’m ready to guide you. You can ask about creating a trip, finding drivers, zones, or admin tools.",
+      requires_supervisor_approval: false,
+      used_data: { assist_topic: "general_onboarding" }
+    };
   }
 
+  if (/how can i create a trip|how do i create a trip|create a trip/.test(text)) {
+    if (memory) memory.lastAssistTopic = "trip_creation";
+    return {
+      category: "general_update",
+      risk_level: "low",
+      internal_summary: "Explained trip creation flow",
+      team_message:
+        "To create a trip, open the Trips tab, tap the plus button, enter the pickup and drop-off, then choose the driver and confirm the trip.",
+      requires_supervisor_approval: false,
+      used_data: { assist_topic: "trip_creation" }
+    };
+  }
+
+  if (isHelpGuidanceMessage(cleanMessage)) {
+    if (memory) memory.lastAssistTopic = "drivers_tab";
+    return {
+      category: "general_update",
+      risk_level: "low",
+      internal_summary: "Guided dispatcher to driver screen",
+      team_message:
+        "Yes, the system is working. Tap the Drivers tab to view available drivers, and I can guide you step by step if you want.",
+      requires_supervisor_approval: false,
+      used_data: { assist_topic: "drivers_tab" }
+    };
+  }
+
+  if (isOffTopicMessage(cleanMessage)) {
+    return {
+      category: "general_update",
+      risk_level: "low",
+      internal_summary: "Redirected off-topic request to dispatch scope",
+      team_message:
+        "I’m here for dispatch operations. If you need a driver, send the pickup location and I’ll help from there.",
+      requires_supervisor_approval: false,
+      used_data: {}
+    };
+  }
+
+  if (!hasDispatchIntent(cleanMessage)) {
+    return null;
+  }
+
+  const hints = extractDispatchHints(cleanMessage);
+
+  if (/send car$|^send car$/.test(text) || (!hints.destination && !hints.pickup && /send car/.test(text))) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Dispatch requested without pickup location",
+      team_message: "Sure — please provide the pickup location so I can dispatch the car.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: hints }
+    };
+  }
+
+  if (/town/.test(text) && hasUncertaintyMarkers(cleanMessage)) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Dispatch request too vague for safe action",
+      team_message: "I can help send a driver. Please tell me the exact pickup location in town.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: hints }
+    };
+  }
+
+  if ((/driver/.test(text) || /send/.test(text)) && !hints.destination && !hints.pickup && /where is|driver/.test(text)) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Panicked dispatch request without location",
+      team_message: "I can help. Please provide the pickup location so I can send a driver immediately.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: hints }
+    };
+  }
+
+  if (/limbe shop|limbe mrkt|limbe market/.test(text) && !hints.pickup) {
+    const target = /limbe shop/.test(text) ? "Limbe Shop" : "Limbe Market";
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: `Dispatch request understood for ${target}`,
+      team_message: hasUrgencyTone(cleanMessage)
+        ? `I understand: a driver is needed at ${target} urgently because the customer has been waiting. Please confirm the pickup point there and I’ll proceed.`
+        : `Understood. Please confirm the pickup point is ${target} so I can dispatch the driver.`,
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: { ...hints, destination: target } }
+    };
+  }
+
+  if ((/shoprite/.test(text) || /customer/.test(text)) && /area 25/.test(text) && /wants to go/.test(text)) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Filtered noisy customer description into dispatch essentials",
+      team_message:
+        "Got it. Please confirm the pickup point is Shoprite and the destination is Area 25, so I can dispatch the driver.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: { ...hints, pickup: "Shoprite", dropoff: "Area 25" } }
+    };
+  }
+
+  if (/chileka airport/.test(text)) {
+    const nearText = /puma/.test(text) ? "Puma" : hints.nearby || "";
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Dispatch request needs pickup confirmation at Chileka Airport",
+      team_message: nearText
+        ? `I understand a driver is needed urgently at Chileka Airport, near ${nearText}. Please confirm that pickup point before I dispatch.`
+        : "I understand a driver is needed at Chileka Airport. Please confirm the exact pickup point before I dispatch.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: { ...hints, destination: "Chileka Airport", nearby: nearText } }
+    };
+  }
+
+  if (/shoprite/.test(text) && /area 25/.test(text)) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Filtered noisy customer description into pickup and drop-off",
+      team_message:
+        "Got it. Please confirm the pickup point is Shoprite and the destination is Area 25, so I can dispatch the driver.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: { ...hints, pickup: "Shoprite", dropoff: "Area 25" } }
+    };
+  }
+
+  if (/tumizani driver/.test(text) && /ndirande/.test(text)) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Chichewa-English dispatch request understood",
+      team_message:
+        "Understood. A driver is needed at Ndirande stage near the hospital. Please confirm if that pickup point is correct.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: { ...hints, destination: "Ndirande stage", nearby: "hospital" } }
+    };
+  }
+
+  if (/car come here/.test(text) || (/limbe/.test(text) && /shop/.test(text))) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Low-literacy dispatch request interpreted as pickup confirmation",
+      team_message: "Understood. Please confirm: do you need a car at Limbe Shop?",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: { ...hints, pickup: "Limbe Shop" } }
+    };
+  }
+
+  if (/somewhere in town|not sure/.test(text)) {
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Vague town pickup needs exact confirmation",
+      team_message: "I can help send a driver. Please tell me the exact pickup location in town.",
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: hints }
+    };
+  }
+
+  if (hints.destination || hints.pickup) {
+    const target = hints.destination || hints.pickup;
+    return {
+      category: "driver_issue",
+      risk_level: "low",
+      internal_summary: "Dispatch request missing final confirmation",
+      team_message: hasUncertaintyMarkers(cleanMessage)
+        ? `I can help with ${target}. Please confirm the exact pickup point before I dispatch.`
+        : `Understood. Please confirm the pickup point is ${target} so I can dispatch the driver.`,
+      requires_supervisor_approval: false,
+      used_data: { dispatch_hints: hints }
+    };
+  }
+
+  return {
+    category: "driver_issue",
+    risk_level: "low",
+    internal_summary: "Dispatch request missing pickup location",
+    team_message: "Sure — please provide the pickup location so I can dispatch a driver safely.",
+    requires_supervisor_approval: false,
+    used_data: { dispatch_hints: hints }
+  };
+}
+
+function safeJsonParse(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function uniqueTokens(value) {
+  return [...new Set(normalizeText(value).split(" ").filter(Boolean))];
+}
+
+function routeMeaningfulTokens(value) {
+  const ignore = new Set([
+    "from",
+    "to",
+    "please",
+    "trip",
+    "route",
+    "how",
+    "much",
+    "price",
+    "fare",
+    "cost",
+    "quote",
+    "the"
+  ]);
+
+  return uniqueTokens(value).filter((token) => !ignore.has(token));
+}
+
+function qualifierTokens(value) {
+  return routeMeaningfulTokens(value).filter(
+    (token) => token !== "area" && !/^\d+$/.test(token)
+  );
+}
+
+function tokenOverlapRatio(sourceTokens, candidateTokens) {
+  if (!sourceTokens.length || !candidateTokens.length) return 0;
+
+  let overlap = 0;
+  for (const token of sourceTokens) {
+    if (candidateTokens.includes(token)) overlap += 1;
+  }
+
+  return overlap / sourceTokens.length;
+}
+
+function scoreLandmarkField(rawName, fieldValue, fieldType = "name") {
+  if (!fieldValue) return 0;
+
+  const rawTokens = routeMeaningfulTokens(rawName);
+  const rawQualifierTokens = qualifierTokens(rawName);
+  const candidateTokens = routeMeaningfulTokens(fieldValue);
+  const candidateQualifierTokens = qualifierTokens(fieldValue);
+  const base = similarity(rawName, fieldValue);
+  const overlap = tokenOverlapRatio(rawTokens, candidateTokens);
+  const qualifierOverlap = tokenOverlapRatio(rawQualifierTokens, candidateQualifierTokens);
+
+  let score = base * 0.45 + overlap * 0.35 + qualifierOverlap * 0.2;
+
+  if (qualifierOverlap > 0) {
+    score += fieldType === "name" ? 0.22 : fieldType === "alias" ? 0.18 : 0.1;
+  }
+
+  if (fieldType === "area" && rawQualifierTokens.length) {
+    score -= 0.35;
+  }
+
+  if ((fieldType === "name" || fieldType === "alias") && qualifierOverlap === 0 && rawQualifierTokens.length) {
+    score -= 0.12;
+  }
+
+  if (fieldType === "nearby") {
+    score -= 0.04;
+  }
+
+  return Math.max(0, Math.min(1, score));
+}
+
+function bestLandmarkMatch(rawName, landmarks) {
+  if (!rawName || !Array.isArray(landmarks)) {
+    return { match: null, score: 0, secondScore: 0, source: null };
+  }
+
+  const sourcePriority = {
+    name: 4,
+    alias: 3,
+    nearby: 2,
+    area: 1
+  };
+
   const candidates = landmarks.map((lm) => {
-    const names = [lm.Landmark_Name, lm.Area, lm.Nearby_Landmarks].filter(Boolean);
+    const noteMeta = safeJsonParse(lm.Notes);
+    const aliasCandidates = [];
 
-    let bestScore = 0;
+    if (typeof noteMeta?.also_known_as === "string" && noteMeta.also_known_as.trim()) {
+      aliasCandidates.push(noteMeta.also_known_as.trim());
+    }
 
-    for (const name of names) {
-      const score = similarity(rawName, name);
-      if (score > bestScore) bestScore = score;
+    const fields = [
+      { type: "name", value: lm.Landmark_Name },
+      ...aliasCandidates.map((value) => ({ type: "alias", value })),
+      ...(String(lm.Nearby_Landmarks || "")
+        .split(";")
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .map((value) => ({ type: "nearby", value }))),
+      { type: "area", value: lm.Area }
+    ];
+
+    let bestFieldScore = 0;
+    let bestFieldType = null;
+    let bestFieldValue = null;
+
+    for (const field of fields) {
+      const score = scoreLandmarkField(rawName, field.value, field.type);
+      if (score > bestFieldScore) {
+        bestFieldScore = score;
+        bestFieldType = field.type;
+        bestFieldValue = field.value;
+      }
     }
 
     return {
       landmark: lm,
-      score: bestScore
+      score: bestFieldScore,
+      source: bestFieldType,
+      sourceValue: bestFieldValue,
+      priority: sourcePriority[bestFieldType] || 0
     };
   });
 
-  candidates.sort((a, b) => b.score - a.score);
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return (b.priority || 0) - (a.priority || 0);
+  });
 
   return {
     match: (candidates[0]?.score || 0) >= 0.55 ? candidates[0]?.landmark || null : null,
-    score: candidates[0]?.score || 0
+    score: candidates[0]?.score || 0,
+    secondScore:
+      (candidates[1]?.score || 0) + ((candidates[1]?.priority || 0) * 0.001),
+    source: candidates[0]?.source || null,
+    sourceValue: candidates[0]?.sourceValue || null
   };
 }
 
@@ -420,6 +839,22 @@ function tapiwaRuleMatchesResolvedLandmarks(row, pickupName, dropoffName) {
   );
 }
 
+function routeIntelMatchesResolvedLandmarks(row, pickupName, dropoffName) {
+  if (!row || !pickupName || !dropoffName) return false;
+  return (
+    samePlaceName(row.pickup_landmark, pickupName) &&
+    samePlaceName(row.dropoff_landmark, dropoffName)
+  );
+}
+
+function routeIntelMatchesRawRoute(row, pickupRaw, dropoffRaw) {
+  if (!row || !pickupRaw || !dropoffRaw) return false;
+  return (
+    similarity(row.pickup_landmark, pickupRaw) >= 0.72 &&
+    similarity(row.dropoff_landmark, dropoffRaw) >= 0.72
+  );
+}
+
 function buildRouteUnderstanding(message, landmarksRaw) {
   const parts = extractRouteParts(message);
 
@@ -437,10 +872,35 @@ function buildRouteUnderstanding(message, landmarksRaw) {
   const dropoffMatch = bestLandmarkMatch(parts.dropoffRaw, landmarksRaw);
 
   const avgScore = (pickupMatch.score + dropoffMatch.score) / 2;
+  const pickupExactNamed =
+    (pickupMatch.source === "name" || pickupMatch.source === "alias") &&
+    pickupMatch.score >= 0.95;
+  const dropoffExactNamed =
+    (dropoffMatch.source === "name" || dropoffMatch.source === "alias") &&
+    dropoffMatch.score >= 0.95;
+  const pickupAmbiguous =
+    pickupMatch.score >= 0.55 &&
+    pickupMatch.score - pickupMatch.secondScore < 0.08 &&
+    !pickupExactNamed;
+  const dropoffAmbiguous =
+    dropoffMatch.score >= 0.55 &&
+    dropoffMatch.score - dropoffMatch.secondScore < 0.08 &&
+    !dropoffExactNamed;
+  const pickupAreaOnly = pickupMatch.source === "area" && qualifierTokens(parts.pickupRaw).length > 0;
+  const dropoffAreaOnly = dropoffMatch.source === "area" && qualifierTokens(parts.dropoffRaw).length > 0;
 
   let confidence = "low";
-  if (avgScore >= 0.78) confidence = "high";
-  else if (avgScore >= 0.55) confidence = "medium";
+  if (
+    avgScore >= 0.78 &&
+    !pickupAmbiguous &&
+    !dropoffAmbiguous &&
+    !pickupAreaOnly &&
+    !dropoffAreaOnly
+  ) {
+    confidence = "high";
+  } else if (avgScore >= 0.55) {
+    confidence = "medium";
+  }
 
   return {
     hasRoute: true,
@@ -451,6 +911,8 @@ function buildRouteUnderstanding(message, landmarksRaw) {
     dropoff: dropoffMatch.match,
     pickup_score: pickupMatch.score,
     dropoff_score: dropoffMatch.score,
+    pickup_source: pickupMatch.source,
+    dropoff_source: dropoffMatch.source,
     note:
       confidence === "high"
         ? "Route understood clearly."
@@ -776,6 +1238,13 @@ async function fetchZachanguContext(userMessage) {
           tapiwaRuleMatchesResolvedLandmarks(row, resolvedPickupName, resolvedDropoffName)
         )
       : [];
+  const exactTapiwaRouteIntel = routeUnderstanding.hasRoute
+    ? (tapiwaIntelligence.route_intelligence || []).filter(
+        (row) =>
+          routeIntelMatchesResolvedLandmarks(row, resolvedPickupName, resolvedDropoffName) ||
+          routeIntelMatchesRawRoute(row, routeUnderstanding.pickupRaw, routeUnderstanding.dropoffRaw)
+      )
+    : [];
 
   const relevantZoneIds = new Set();
 
@@ -846,7 +1315,10 @@ async function fetchZachanguContext(userMessage) {
       ...tapiwaIntelligence,
       market_price_rules: exactTapiwaMarketRules.length
         ? exactTapiwaMarketRules.map(slimTapiwaMarketRule)
-        : tapiwaIntelligence.market_price_rules
+        : tapiwaIntelligence.market_price_rules,
+      route_intelligence: routeUnderstanding.hasRoute
+        ? exactTapiwaRouteIntel.map(slimTapiwaRouteIntel)
+        : tapiwaIntelligence.route_intelligence
     },
 
     data_counts: {
@@ -868,6 +1340,7 @@ async function fetchZachanguContext(userMessage) {
       exact_route_matrix: exactRouteMatches.length,
       exact_market_prices: exactMarketPriceMatches.length,
       exact_tapiwa_market_rules: exactTapiwaMarketRules.length,
+      exact_tapiwa_route_intelligence: exactTapiwaRouteIntel.length,
       ...tapiwaIntelligence.matched_counts
     },
 
@@ -950,6 +1423,84 @@ function calculateBasicFare(context) {
   };
 }
 
+function buildDeterministicPricingReply(cleanMessage, context, memory) {
+  const routeUnderstanding = context.route_understanding || {};
+  const computedFare = calculateBasicFare(context);
+  const routeIntel = context.tapiwa_intelligence?.route_intelligence?.[0] || null;
+  const confirmedRoute = memory?.confirmedRoute || null;
+
+  if (routeUnderstanding?.hasRoute && routeUnderstanding.confidence === "low") {
+    return {
+      category: "pricing_issue",
+      risk_level: "low",
+      internal_summary: "Route unclear",
+      team_message: "I can’t lock that route yet — send the pickup and drop-off clearly.",
+      requires_supervisor_approval: false,
+      used_data: { route_understanding: routeUnderstanding, computed_fare: null }
+    };
+  }
+
+  if (routeUnderstanding?.hasRoute && routeUnderstanding.confidence === "medium") {
+    const pickupName =
+      routeUnderstanding.pickup?.Landmark_Name || routeUnderstanding.pickupRaw;
+    const dropoffName =
+      routeUnderstanding.dropoff?.Landmark_Name || routeUnderstanding.dropoffRaw;
+    return {
+      category: "pricing_issue",
+      risk_level: "low",
+      internal_summary: "Route needs confirmation",
+      team_message: `I think you mean ${pickupName} to ${dropoffName} — confirm that route before I quote it.`,
+      requires_supervisor_approval: false,
+      used_data: { route_understanding: routeUnderstanding, computed_fare: null }
+    };
+  }
+
+  if (computedFare) {
+    const routeUsed = computedFare.route_used || routeToLookupMessage(confirmedRoute) || cleanMessage;
+    return {
+      category: "pricing_issue",
+      risk_level: "low",
+      internal_summary: `Quoted ${routeUsed}`,
+      team_message: `For ${routeUsed}, quote around MWK ${Number(computedFare.recommended_mwk || computedFare.estimated_low_mwk).toLocaleString()} — safe range is MWK ${Number(computedFare.estimated_low_mwk).toLocaleString()} to MWK ${Number(computedFare.estimated_high_mwk).toLocaleString()}.`,
+      requires_supervisor_approval: false,
+      used_data: { computed_fare: computedFare, route_understanding: routeUnderstanding }
+    };
+  }
+
+  if (routeIntel) {
+    const routeUsed = `${routeIntel.pickup_landmark} â†’ ${routeIntel.dropoff_landmark}`;
+    const distanceText =
+      routeIntel.distance_min_km && routeIntel.distance_max_km
+        ? `${routeIntel.distance_min_km} to ${routeIntel.distance_max_km} km`
+        : null;
+    const pricingText = routeIntel.pricing_notes || "I don’t have a locked fare yet.";
+    return {
+      category: "pricing_issue",
+      risk_level: "low",
+      internal_summary: `Used route intelligence for ${routeUsed}`,
+      team_message: distanceText
+        ? `For ${routeUsed}, I’m seeing about ${distanceText}. ${pricingText}`
+        : `For ${routeUsed}, ${pricingText}`,
+      requires_supervisor_approval: false,
+      used_data: { route_intelligence: [routeIntel], route_understanding: routeUnderstanding }
+    };
+  }
+
+  if (confirmedRoute) {
+    const lookupMessage = routeToLookupMessage(confirmedRoute);
+    return {
+      category: "pricing_issue",
+      risk_level: "low",
+      internal_summary: `No pricing data for ${lookupMessage}`,
+      team_message: `I’ve kept ${lookupMessage}. I don’t have pricing for it yet — check distance manually before quoting.`,
+      requires_supervisor_approval: false,
+      used_data: { confirmed_route: confirmedRoute, computed_fare: null }
+    };
+  }
+
+  return null;
+}
+
 async function saveAuditLog(payload) {
   await supabaseInsert("tapiwa_ai_audit_logs", {
     request_type: payload.request_type || "team_chat",
@@ -985,10 +1536,6 @@ app.post("/ai/analyze", async (req, res) => {
       return res.status(400).json({ error: "Message is required" });
     }
 
-    if (!GROQ_API_KEY) {
-      return res.status(500).json({ error: "Missing GROQ_API_KEY" });
-    }
-
     if (!hasTapiwaCall(message)) {
       return res.json({
         ignored: true,
@@ -1005,10 +1552,47 @@ app.post("/ai/analyze", async (req, res) => {
     });
 
     const memory = getConversationMemory(sessionId);
+    const localRuleOnlyMode = !GROQ_API_KEY;
     const isAffirmation = isAffirmationMessage(cleanMessage);
     const isCorrection = isCorrectionMessage(cleanMessage);
     const isFollowUp = isFollowUpRouteMessage(cleanMessage);
     const hasExplicitRoute = isExplicitRouteMessage(cleanMessage);
+
+    if (isAffirmation && memory.lastAssistTopic && !memory.pendingConfirmation) {
+      let teamMessage =
+        "I’m with you. Tell me which part you want help with next and I’ll guide you.";
+
+      if (memory.lastAssistTopic === "drivers_tab") {
+        teamMessage =
+          "Great. Open the Drivers tab first, then tell me what you see and I’ll guide you to the next step.";
+      } else if (memory.lastAssistTopic === "trip_creation") {
+        teamMessage =
+          "Great. Open the Trips tab, tap the plus button, and I’ll guide you through the trip form step by step.";
+      } else if (memory.lastAssistTopic === "general_onboarding") {
+        teamMessage =
+          "Great. Tell me whether you want help with trips, drivers, zones, or admin, and I’ll guide you.";
+      }
+
+      saveConversationMemory(sessionId, memory);
+
+      return res.json({
+        ignored: false,
+        category: "general_update",
+        risk_level: "low",
+        internal_summary: `Continued guidance for ${memory.lastAssistTopic}`,
+        team_message: teamMessage,
+        requires_supervisor_approval: false,
+        used_data: {
+          assist_topic: memory.lastAssistTopic
+        },
+        debug_memory: {
+          sessionId,
+          lastRoute: memory.lastRoute,
+          pendingConfirmation: memory.pendingConfirmation,
+          confirmedRoute: memory.confirmedRoute
+        }
+      });
+    }
 
     if (isAffirmation && memory.pendingConfirmation && memory.lastRoute) {
       memory.confirmedRoute = { ...memory.lastRoute };
@@ -1060,7 +1644,7 @@ app.post("/ai/analyze", async (req, res) => {
       saveConversationMemory(sessionId, memory);
 
       const teamMessage = computedFare
-        ? `For ${lookupMessage}, it should be around MWK ${Number(
+        ? `For ${computedFare.route_used || lookupMessage}, it should be around MWK ${Number(
             computedFare.recommended_mwk || computedFare.estimated_low_mwk
           ).toLocaleString()} — safe range is MWK ${Number(
             computedFare.estimated_low_mwk
@@ -1109,7 +1693,29 @@ app.post("/ai/analyze", async (req, res) => {
 
     context = await fetchZachanguContext(cleanMessage);
     const routeUnderstanding = context.route_understanding;
-    const detectedRoute = routeSnapshotFromUnderstanding(routeUnderstanding);
+    let detectedRoute = routeSnapshotFromUnderstanding(routeUnderstanding);
+    const topRouteIntel = context.tapiwa_intelligence?.route_intelligence?.[0] || null;
+    if (
+      topRouteIntel &&
+      routeUnderstanding?.hasRoute &&
+      routeIntelMatchesRawRoute(
+        topRouteIntel,
+        routeUnderstanding.pickupRaw,
+        routeUnderstanding.dropoffRaw
+      )
+    ) {
+      detectedRoute = {
+        pickup: topRouteIntel.pickup_landmark,
+        dropoff: topRouteIntel.dropoff_landmark,
+        pickupRaw: routeUnderstanding.pickupRaw,
+        dropoffRaw: routeUnderstanding.dropoffRaw,
+        confidence: "high"
+      };
+      routeUnderstanding.pickup = { Landmark_Name: topRouteIntel.pickup_landmark };
+      routeUnderstanding.dropoff = { Landmark_Name: topRouteIntel.dropoff_landmark };
+      routeUnderstanding.confidence = "high";
+      routeUnderstanding.note = "Route resolved from Tapiwa route intelligence.";
+    }
 
     if (detectedRoute) {
       memory.lastRoute = { ...detectedRoute };
@@ -1132,9 +1738,17 @@ app.post("/ai/analyze", async (req, res) => {
 
     saveConversationMemory(sessionId, memory);
 
-    const computedFare = calculateBasicFare(context);
-
-    const isPricingRequest = isPricingLikeMessage(cleanMessage) || isFollowUp;
+    const isPricingRequest =
+      isPricingLikeMessage(cleanMessage) ||
+      isFollowUp ||
+      (isCorrection && hasExplicitRoute);
+    const deterministicPricingReply = isPricingRequest
+      ? buildDeterministicPricingReply(cleanMessage, context, memory)
+      : null;
+    const deterministicDispatchReply = !isPricingRequest
+      ? buildDeterministicDispatchReply(cleanMessage, memory)
+      : null;
+    const computedFare = deterministicPricingReply?.used_data?.computed_fare || calculateBasicFare(context);
     const hasAnyPricingData =
       context.tapiwa_intelligence.market_price_rules.length > 0 ||
       context.tapiwa_intelligence.route_intelligence.length > 0 ||
@@ -1168,6 +1782,68 @@ app.post("/ai/analyze", async (req, res) => {
         "Hmm, I don't have pricing for that route yet — check the distance manually or ask someone who's done that run before quoting.";
     }
 
+    if (deterministicPricingReply) {
+      const responsePayload = {
+        ignored: false,
+        ...deterministicPricingReply,
+        debug_memory: {
+          sessionId,
+          lastRoute: memory.lastRoute,
+          pendingConfirmation: memory.pendingConfirmation,
+          confirmedRoute: memory.confirmedRoute
+        },
+        debug_data_counts: context.data_counts,
+        debug_matched_counts: context.matched_counts
+      };
+      await saveAuditLog({
+        request_type: "team_chat",
+        user_message: message,
+        clean_message: cleanMessage,
+        ai_category: responsePayload.category,
+        risk_level: responsePayload.risk_level,
+        team_message: responsePayload.team_message,
+        internal_summary: responsePayload.internal_summary,
+        used_data: responsePayload.used_data,
+        raw_ai_response: { deterministic: true },
+        success: true
+      });
+      return res.json(responsePayload);
+    }
+
+    if (deterministicDispatchReply) {
+      if (!hasExplicitRoute) {
+        memory.pendingConfirmation = false;
+        memory.lastRoute = null;
+      }
+      saveConversationMemory(sessionId, memory);
+
+      const responsePayload = {
+        ignored: false,
+        ...deterministicDispatchReply,
+        debug_memory: {
+          sessionId,
+          lastRoute: memory.lastRoute,
+          pendingConfirmation: memory.pendingConfirmation,
+          confirmedRoute: memory.confirmedRoute
+        },
+        debug_data_counts: context.data_counts,
+        debug_matched_counts: context.matched_counts
+      };
+      await saveAuditLog({
+        request_type: "team_chat",
+        user_message: message,
+        clean_message: cleanMessage,
+        ai_category: responsePayload.category,
+        risk_level: responsePayload.risk_level,
+        team_message: responsePayload.team_message,
+        internal_summary: responsePayload.internal_summary,
+        used_data: responsePayload.used_data,
+        raw_ai_response: { deterministic_dispatch: true },
+        success: true
+      });
+      return res.json(responsePayload);
+    }
+
     const systemPrompt = `You are Dispatch Tapiwa, a real person on the Zachangu dispatch team in Lilongwe, Malawi.
 
 You help the crew with operations, pricing, safety, and dispatch decisions.
@@ -1181,6 +1857,11 @@ IMPORTANT PERSONALITY:
 - 1 to 2 sentences max.
 - No bullets in team_message.
 - No formal labels in team_message.
+- Understand obvious typing mistakes and low-literacy phrasing.
+- Understand mixed Chichewa and English when the dispatch intent is clear.
+- Ignore irrelevant details like clothing color unless they help confirm pickup.
+- Stay calm if the dispatcher sounds panicked or repeats themselves.
+- Never criticize grammar, spelling, or wording.
 
 ROUTE MEMORY RULES:
 - Respect confirmed_route from conversation_memory.
@@ -1195,6 +1876,13 @@ PRICING RULES:
 - Never recommend below MWK 3,000.
 - Round prices to nearest MWK 100.
 - Prefer Tapiwa intelligence tables when available.
+
+DISPATCH SAFETY RULES:
+- Never say a driver is dispatched unless the pickup point is clear enough.
+- If a pickup point is vague, ask a short clarification question.
+- If the dispatcher asks how to use the app, guide them to the right screen.
+- If the request is off-topic, redirect back to dispatch operations.
+- If a place is uncertain, confirm it instead of guessing.
 
 JSON only:
 {
@@ -1217,7 +1905,7 @@ JSON only:
   }
 }`;
 
-    if (!forcedMessage) {
+    if (!forcedMessage && !localRuleOnlyMode) {
       const groqResponse = await fetchWithTimeout(
         "https://api.groq.com/openai/v1/chat/completions",
         {
@@ -1260,12 +1948,13 @@ JSON only:
             max_tokens: 500
           })
         },
-        12000
+        5000
       );
 
       const groqData = await groqResponse.json();
 
       if (!groqResponse.ok) {
+        console.error("GROQ API ERROR:", groqResponse.status, groqData);
         await saveAuditLog({
           request_type: "team_chat",
           user_message: message,
@@ -1275,10 +1964,7 @@ JSON only:
           raw_ai_response: groqData
         });
 
-        return res.status(groqResponse.status).json({
-          error: "Groq API error",
-          details: groqData
-        });
+        return res.json(buildTemporaryTapiwaFallback());
       }
 
       try {
@@ -1390,6 +2076,11 @@ JSON only:
       debug_matched_counts: context.matched_counts
     };
 
+    if (!responsePayload.team_message) {
+      responsePayload.team_message =
+        "Alright, checking that — confirm pickup and I'll guide you.";
+    }
+
     await saveAuditLog({
       request_type: "team_chat",
       user_message: message,
@@ -1405,8 +2096,10 @@ JSON only:
 
     return res.json(responsePayload);
   } catch (error) {
+    console.error("AI ERROR:", error);
     await saveAuditLog({
       request_type: "team_chat",
+      user_message: req.body?.message || null,
       clean_message: cleanMessage,
       used_data: context,
       raw_ai_response: aiResult,
@@ -1414,10 +2107,7 @@ JSON only:
       error_message: error.message
     });
 
-    return res.status(500).json({
-      error: "AI server failed",
-      details: error.message
-    });
+    return res.json(buildTemporaryTapiwaFallback());
   }
 });
 
