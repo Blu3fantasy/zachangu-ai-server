@@ -356,8 +356,8 @@ function calculateBasicFare(context) {
   const rawFare = distance * rate;
   const baseFare = Math.max(rawFare, minimum);
 
-  const low = Math.round(baseFare * 0.95 / 500) * 500;
-  const high = Math.round(baseFare * 1.08 / 500) * 500;
+  const low = Math.round((baseFare * 0.95) / 500) * 500;
+  const high = Math.round((baseFare * 1.08) / 500) * 500;
 
   return {
     distance_km: distance,
@@ -408,107 +408,66 @@ app.post("/ai/analyze", async (req, res) => {
 
     if (isPricingRequest && !hasAnyPricingData) {
       forcedMessage =
-        "I don’t have verified pricing data for that route yet, so use manual distance or a confirmed market price before quoting the customer.";
+        "No verified pricing on that route yet — use manual distance or a confirmed market price before quoting.";
     }
 
-    const systemPrompt = `
-You are Tapiwa Ops AI for Zachangu Commuters Limited, a ride-hailing and dispatch operation in Malawi.
+    // ── SYSTEM PROMPT (lean version) ──────────────────────────────────────────
+    // Target: ~120 tokens vs ~350 tokens in the old version.
+    // Culture: casual, disciplined, team-builder, good work ethics.
+    const systemPrompt = `You are Tapiwa, Zachangu's dispatch AI. Casual, sharp, team-first. Malawi ride-hailing ops.
 
-You only respond when called with @Tapiwa.
+VOICE: Speak like a trusted team member — warm but disciplined. Encourage good habits. Keep the crew motivated and accountable without being preachy.
 
-You speak like a calm human team leader inside a dispatch team chat.
+RULES:
+- team_message: 1 sentence (2 max). Human tone. No bullets, no labels, no jargon.
+- Safety first: never send drivers into unsafe areas. Pause and escalate to supervisor if high-risk.
+- Pricing: only use supplied computed_fare or market_prices values. Never invent numbers.
+- Never take direct action (no approvals, cancellations, price edits, driver assignments).
+- category: incident|pricing_issue|driver_issue|traffic|system_issue|general_update
+- risk_level: low|medium|high
 
-STYLE:
-- team_message must sound like a normal human message.
-- One sentence is best. Two short sentences maximum.
-- No bullets inside team_message.
-- No labels inside team_message.
-- No scary tone unless there is real danger.
-- Do not use phrases like "risk level", "category", "incident detected", or "action required" inside team_message.
-
-CATEGORY:
-category MUST be exactly one of:
-incident, pricing_issue, driver_issue, traffic, system_issue, general_update
-
-RISK:
-risk_level MUST be exactly one of:
-low, medium, high
-
-SAFETY:
-- Zachangu does NOT have security teams or enforcement units.
-- Never suggest sending security teams.
-- Never suggest sending drivers into unsafe areas.
-- For robbery, violence, threats, or accidents, prioritize safety first.
-- For unsafe locations, recommend pausing assignments until supervisor clearance.
-- High-risk issues must require supervisor approval.
-- Do not approve, cancel, assign drivers, block customers, change prices, or edit trips directly.
-
-PRICING:
-- Never invent fares.
-- Never give a fare number unless supplied context or computed_fare supports it.
-- If computed_fare exists, you may use that range.
-- If market_prices exists, you may use Min_Price, Max_Price, or Avg_Price.
-- If only partial route data exists, say it is an estimate.
-- If no pricing data exists, say dispatcher should confirm using manual distance or verified market price.
-- Mention MWK only when supported by supplied data.
-
-OUTPUT:
-Return JSON only.
-
-Return exactly:
-{
-  "category": "",
-  "risk_level": "",
-  "internal_summary": "",
-  "team_message": "",
-  "requires_supervisor_approval": false,
-  "used_data": {
-    "zones": [],
-    "landmarks": [],
-    "pricing_rules": [],
-    "market_prices": [],
-    "route_matrix": [],
-    "computed_fare": null
-  }
-}
-`;
+Respond JSON only:
+{"category":"","risk_level":"","internal_summary":"","team_message":"","requires_supervisor_approval":false,"used_data":{"zones":[],"landmarks":[],"pricing_rules":[],"market_prices":[],"route_matrix":[],"computed_fare":null}}`;
 
     let aiResult = {};
 
     if (!forcedMessage) {
-      const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content: JSON.stringify({
-                senderName,
-                senderRole,
-                user_message: cleanMessage,
-                zachangu_context: {
-                  zones: context.zones,
-                  landmarks: context.landmarks,
-                  pricing_rules: context.pricing_rules,
-                  market_prices: context.market_prices,
-                  route_matrix: context.route_matrix,
-                  risks: context.risks
-                },
-                computed_fare: computedFare
-              })
-            }
-          ],
-          response_format: { type: "json_object" },
-          temperature: 0.15,
-          max_tokens: 500
-        })
-      });
+      const groqResponse = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: GROQ_MODEL,
+            messages: [
+              { role: "system", content: systemPrompt },
+              {
+                role: "user",
+                // Only send what the model actually needs — drop debug counts
+                content: JSON.stringify({
+                  sender: `${senderName} (${senderRole})`,
+                  msg: cleanMessage,
+                  ctx: {
+                    zones: context.zones,
+                    landmarks: context.landmarks,
+                    pricing_rules: context.pricing_rules,
+                    market_prices: context.market_prices,
+                    route_matrix: context.route_matrix,
+                    risks: context.risks
+                  },
+                  fare: computedFare
+                })
+              }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.2,
+            max_tokens: 350  // reduced from 500; output is small JSON
+          })
+        }
+      );
 
       const groqData = await groqResponse.json();
 
@@ -520,7 +479,9 @@ Return exactly:
       }
 
       try {
-        aiResult = JSON.parse(groqData.choices?.[0]?.message?.content || "{}");
+        aiResult = JSON.parse(
+          groqData.choices?.[0]?.message?.content || "{}"
+        );
       } catch {
         aiResult = {};
       }
@@ -541,7 +502,6 @@ Return exactly:
 
     if (!allowedCategories.includes(category)) {
       const lower = cleanMessage.toLowerCase();
-
       if (/price|fare|cost|charge|quote/.test(lower)) category = "pricing_issue";
       else if (/robbed|accident|threat|violence|attack|stolen/.test(lower)) category = "incident";
       else if (/driver/.test(lower)) category = "driver_issue";
@@ -552,17 +512,18 @@ Return exactly:
     let riskLevel = aiResult.risk_level || "low";
     if (!allowedRiskLevels.includes(riskLevel)) riskLevel = "low";
 
-    let fallbackMessage = "Noted team, let’s handle this calmly and keep operations moving.";
+    let fallbackMessage =
+      "Got it team, let's stay focused and keep things moving smoothly.";
 
     if (category === "pricing_issue") {
       if (computedFare) {
-        fallbackMessage = `That route estimate is around MWK ${computedFare.estimated_low_mwk.toLocaleString()} to MWK ${computedFare.estimated_high_mwk.toLocaleString()}, confirm the exact pickup and traffic before quoting.`;
+        fallbackMessage = `That route is roughly MWK ${computedFare.estimated_low_mwk.toLocaleString()}–${computedFare.estimated_high_mwk.toLocaleString()}, confirm pickup and traffic before quoting.`;
       } else if (context.market_prices.length > 0) {
         const mp = context.market_prices[0];
-        fallbackMessage = `Use around MWK ${Number(mp.Min_Price).toLocaleString()} to MWK ${Number(mp.Max_Price).toLocaleString()} as a guide for this route, then confirm with the rider before dispatch.`;
+        fallbackMessage = `Use MWK ${Number(mp.Min_Price).toLocaleString()}–${Number(mp.Max_Price).toLocaleString()} as a guide, then confirm with the rider before dispatch.`;
       } else {
         fallbackMessage =
-          "I don’t have verified pricing data for that route yet, so use manual distance or a confirmed market price before quoting the customer.";
+          "No verified pricing on that route yet — use manual distance or a confirmed market price before quoting.";
       }
     }
 
