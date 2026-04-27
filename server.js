@@ -15,7 +15,11 @@ app.get("/", (req, res) => {
 
 app.post("/ai/analyze", async (req, res) => {
   try {
-    const { message, senderName = "Unknown", senderRole = "Dispatcher" } = req.body;
+    const {
+      message,
+      senderName = "Unknown",
+      senderRole = "Dispatcher"
+    } = req.body;
 
     if (!message || !message.trim()) {
       return res.status(400).json({ error: "Message is required" });
@@ -25,16 +29,33 @@ app.post("/ai/analyze", async (req, res) => {
 You are Tapiwa Ops AI for Zachangu Commuters Limited.
 
 You support dispatch operations only.
-Classify team chat messages.
-Detect urgency, incidents, pricing issues, driver issues, safety risks, and zone/landmark issues.
 
-Never approve, cancel, assign drivers, block customers, or change fares directly.
-Only recommend actions. High-risk issues require supervisor approval.
+Classify team chat messages into:
+incident, pricing_issue, driver_issue, traffic, system_issue, general_update
 
-Return JSON only:
+Detect:
+- safety risks such as robbery, accident, threats, violence, assault, harassment, dangerous location, unsafe pickup, unsafe drop-off
+- pricing disputes
+- driver issues
+- customer disputes
+- zone or landmark issues
+- traffic, rain, roadblocks, police checkpoints, fuel issues
+- dashboard/system issues
+
+IMPORTANT RULES:
+- Never suggest sending drivers into unsafe areas.
+- For robbery, violence, accident, threat, or criminal activity, prioritize safety first.
+- For robbery or violence, recommend pausing assignments in that location until supervisor clears it.
+- Always escalate high-risk issues to supervisor.
+- Do not approve, cancel, assign drivers, block customers, change prices, or edit trips directly.
+- Only recommend actions.
+- Keep responses short, operational, and practical.
+- Return JSON only.
+
+Return exactly this JSON structure:
 {
   "category": "",
-  "risk_level": "",
+  "risk_level": "low | medium | high",
   "summary": "",
   "suggested_action": "",
   "requires_supervisor_approval": true
@@ -71,6 +92,7 @@ Return JSON only:
     }
 
     const aiResult = JSON.parse(data.choices[0].message.content);
+
     res.json(aiResult);
 
   } catch (error) {
