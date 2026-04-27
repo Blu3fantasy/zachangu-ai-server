@@ -385,9 +385,39 @@ function bestLandmarkMatch(rawName, landmarks) {
   candidates.sort((a, b) => b.score - a.score);
 
   return {
-    match: candidates[0]?.landmark || null,
+    match: (candidates[0]?.score || 0) >= 0.55 ? candidates[0]?.landmark || null : null,
     score: candidates[0]?.score || 0
   };
+}
+
+function samePlaceName(a, b) {
+  const left = normalizeText(a);
+  const right = normalizeText(b);
+  return Boolean(left && right && left === right);
+}
+
+function routeMatchesResolvedLandmarks(route, pickupName, dropoffName) {
+  if (!route || !pickupName || !dropoffName) return false;
+  return (
+    samePlaceName(route.From_Landmark, pickupName) &&
+    samePlaceName(route.To_Landmark, dropoffName)
+  );
+}
+
+function marketPriceMatchesResolvedLandmarks(row, pickupName, dropoffName) {
+  if (!row || !pickupName || !dropoffName) return false;
+  return (
+    samePlaceName(row.Origin_Landmark, pickupName) &&
+    samePlaceName(row.Destination_Landmark, dropoffName)
+  );
+}
+
+function tapiwaRuleMatchesResolvedLandmarks(row, pickupName, dropoffName) {
+  if (!row || !pickupName || !dropoffName) return false;
+  return (
+    samePlaceName(row.pickup_landmark, pickupName) &&
+    samePlaceName(row.dropoff_landmark, dropoffName)
+  );
 }
 
 function buildRouteUnderstanding(message, landmarksRaw) {
@@ -726,6 +756,26 @@ async function fetchZachanguContext(userMessage) {
   const matchedMarketPrices = topMatches(marketPricesRaw, keywords, 8);
   const matchedRoutes = topMatches(routeMatrixRaw, keywords, 8);
   const matchedRisks = topMatches(risksRaw, keywords, 5);
+  const resolvedPickupName = routeUnderstanding.pickup?.Landmark_Name || null;
+  const resolvedDropoffName = routeUnderstanding.dropoff?.Landmark_Name || null;
+  const exactRouteMatches =
+    routeUnderstanding.confidence === "high" && resolvedPickupName && resolvedDropoffName
+      ? routeMatrixRaw.filter((route) =>
+          routeMatchesResolvedLandmarks(route, resolvedPickupName, resolvedDropoffName)
+        )
+      : [];
+  const exactMarketPriceMatches =
+    routeUnderstanding.confidence === "high" && resolvedPickupName && resolvedDropoffName
+      ? marketPricesRaw.filter((row) =>
+          marketPriceMatchesResolvedLandmarks(row, resolvedPickupName, resolvedDropoffName)
+        )
+      : [];
+  const exactTapiwaMarketRules =
+    routeUnderstanding.confidence === "high" && resolvedPickupName && resolvedDropoffName
+      ? (tapiwaIntelligence.market_price_rules || []).filter((row) =>
+          tapiwaRuleMatchesResolvedLandmarks(row, resolvedPickupName, resolvedDropoffName)
+        )
+      : [];
 
   const relevantZoneIds = new Set();
 
@@ -764,13 +814,40 @@ async function fetchZachanguContext(userMessage) {
       ? activePricingRules.map(slimPricingRule)
       : pricingRulesRaw.slice(0, 4).map(slimPricingRule),
 
-    market_prices: matchedMarketPrices.slice(0, 8).map(slimMarketPrice),
+    market_prices: [...exactMarketPriceMatches, ...matchedMarketPrices]
+      .filter(
+        (v, i, arr) =>
+          arr.findIndex(
+            (x) =>
+              String(x.Route_ID || "") === String(v.Route_ID || "") &&
+              String(x.Origin_Landmark || "") === String(v.Origin_Landmark || "") &&
+              String(x.Destination_Landmark || "") === String(v.Destination_Landmark || "")
+          ) === i
+      )
+      .slice(0, 8)
+      .map(slimMarketPrice),
 
-    route_matrix: matchedRoutes.slice(0, 8).map(slimRoute),
+    route_matrix: [...exactRouteMatches, ...matchedRoutes]
+      .filter(
+        (v, i, arr) =>
+          arr.findIndex(
+            (x) =>
+              String(x.Route_Key || "") === String(v.Route_Key || "") &&
+              String(x.From_Landmark || "") === String(v.From_Landmark || "") &&
+              String(x.To_Landmark || "") === String(v.To_Landmark || "")
+          ) === i
+      )
+      .slice(0, 8)
+      .map(slimRoute),
 
     risks: matchedRisks.slice(0, 5).map(slimRisk),
 
-    tapiwa_intelligence: tapiwaIntelligence,
+    tapiwa_intelligence: {
+      ...tapiwaIntelligence,
+      market_price_rules: exactTapiwaMarketRules.length
+        ? exactTapiwaMarketRules.map(slimTapiwaMarketRule)
+        : tapiwaIntelligence.market_price_rules
+    },
 
     data_counts: {
       zones: zonesRaw.length,
@@ -788,6 +865,9 @@ async function fetchZachanguContext(userMessage) {
       market_prices: matchedMarketPrices.length,
       route_matrix: matchedRoutes.length,
       risks: matchedRisks.length,
+      exact_route_matrix: exactRouteMatches.length,
+      exact_market_prices: exactMarketPriceMatches.length,
+      exact_tapiwa_market_rules: exactTapiwaMarketRules.length,
       ...tapiwaIntelligence.matched_counts
     },
 
@@ -796,9 +876,28 @@ async function fetchZachanguContext(userMessage) {
 }
 
 function calculateBasicFare(context) {
+  const routeUnderstanding = context.route_understanding || {};
+  const resolvedPickupName = routeUnderstanding.pickup?.Landmark_Name || null;
+  const resolvedDropoffName = routeUnderstanding.dropoff?.Landmark_Name || null;
+  const hasConfirmedExactRoute =
+    routeUnderstanding.confidence === "high" &&
+    resolvedPickupName &&
+    resolvedDropoffName;
+
+  if (!hasConfirmedExactRoute) {
+    return null;
+  }
+
   const tapiwaRule = context.tapiwa_intelligence?.market_price_rules?.[0];
 
-  if (tapiwaRule?.recommended_price) {
+  if (
+    tapiwaRule?.recommended_price &&
+    tapiwaRuleMatchesResolvedLandmarks(
+      tapiwaRule,
+      resolvedPickupName,
+      resolvedDropoffName
+    )
+  ) {
     const recommended = cleanPrice(tapiwaRule.recommended_price);
     const low = cleanPrice(tapiwaRule.min_price || recommended);
     const high = cleanPrice(tapiwaRule.max_price || recommended);
@@ -813,7 +912,9 @@ function calculateBasicFare(context) {
     };
   }
 
-  const route = context.route_matrix?.[0];
+  const route = (context.route_matrix || []).find((row) =>
+    routeMatchesResolvedLandmarks(row, resolvedPickupName, resolvedDropoffName)
+  );
   const rule =
     context.pricing_rules?.find((r) =>
       String(r.Vehicle_Type || "").toLowerCase().includes("motorbike")
@@ -1021,7 +1122,11 @@ app.post("/ai/analyze", async (req, res) => {
         memory.confirmedRoute = { ...detectedRoute };
         memory.pendingConfirmation = false;
       } else if (detectedRoute.confidence === "medium") {
+        memory.confirmedRoute = null;
         memory.pendingConfirmation = true;
+      } else {
+        memory.confirmedRoute = null;
+        memory.pendingConfirmation = false;
       }
     }
 
@@ -1041,7 +1146,24 @@ app.post("/ai/analyze", async (req, res) => {
 
     let forcedMessage = null;
 
-    if (isPricingRequest && !hasAnyPricingData) {
+    if (
+      isPricingRequest &&
+      routeUnderstanding?.hasRoute &&
+      routeUnderstanding.confidence === "low"
+    ) {
+      forcedMessage =
+        "I can’t lock that route yet — send the pickup and drop-off clearly before I quote it.";
+    } else if (
+      isPricingRequest &&
+      routeUnderstanding?.hasRoute &&
+      routeUnderstanding.confidence === "medium"
+    ) {
+      const pickupName =
+        routeUnderstanding.pickup?.Landmark_Name || routeUnderstanding.pickupRaw;
+      const dropoffName =
+        routeUnderstanding.dropoff?.Landmark_Name || routeUnderstanding.dropoffRaw;
+      forcedMessage = `I think you mean ${pickupName} to ${dropoffName} — confirm that route before I quote it.`;
+    } else if (isPricingRequest && !hasAnyPricingData) {
       forcedMessage =
         "Hmm, I don't have pricing for that route yet — check the distance manually or ask someone who's done that run before quoting.";
     }
