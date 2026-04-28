@@ -12,6 +12,7 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const TAPIWA_GROQ_API_KEY = process.env.TAPIWA_GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const MAURICE_ENABLED = process.env.MAURICE_ENABLED !== "false";
 const MAURICE_MODEL = process.env.MAURICE_MODEL || GROQ_MODEL;
@@ -74,7 +75,15 @@ app.get("/", (req, res) => {
     tapiwa_intelligence_ready: true
   });
 });
-
+app.get("/debug-ai-keys", (req, res) => {
+  res.json({
+    maurice_key_loaded: Boolean(GROQ_API_KEY),
+    tapiwa_key_loaded: Boolean(TAPIWA_GROQ_API_KEY),
+    maurice_model: MAURICE_MODEL,
+    tapiwa_model: TAPIWA_MODEL,
+    maurice_enabled: MAURICE_ENABLED
+  });
+});
 app.get("/debug-tables", async (req, res) => {
   const tables = [
     "zones","landmarks","pricing_rules","market_prices","route_matrix","risks",
@@ -809,7 +818,7 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       "https://api.groq.com/openai/v1/chat/completions",
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${TAPIWA_GROQ_API_KEY}`,, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: GROQ_MODEL,
           messages: [
