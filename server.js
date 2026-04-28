@@ -64,7 +64,7 @@ JSON structure:
   "confidence": 0
 }
 `;
-async function callMaurice(userMessage, systemContext = {}) {
+
   if (!MAURICE_ENABLED) return null;
 
   const payload = {
@@ -865,19 +865,19 @@ Respond ONLY with this JSON (no markdown, no extra keys):
         body: JSON.stringify({
           model: GROQ_MODEL,
           messages: [
-            {
-  role: "user",
-  content: mauriceData
-    ? JSON.stringify({
-        ...userPayload,
-        maurice: mauriceData,
-        note: "Use Maurice data for any trip, pricing, routing, or dispatch decisions. Do not guess."
-})
+  { role: "system", content: systemPrompt },
+  {
+    role: "user",
+    content: mauriceData
+      ? JSON.stringify({
+          ...userPayload,
+          maurice: mauriceData,
+          note: "Use Maurice data for any trip, pricing, routing, or dispatch decisions. Do not guess."
+        })
       : JSON.stringify(userPayload)
   }
-]
-            { role: "user", content: JSON.stringify(userPayload) }
-          ],
+],
+          
           response_format: { type: "json_object" },
           temperature: 0.55,   // slightly higher = more natural, less mechanical
           max_tokens: 300
