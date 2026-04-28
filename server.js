@@ -1,6 +1,9 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
 
@@ -14,6 +17,11 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON || "";
 const SUPABASE_API_KEY = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MEMORY_FILE = path.join(__dirname, "conversation-memory.json");
+const MEMORY_TTL_MS = 1000 * 60 * 60 * 12;
+const MEMORY_MAX_SESSIONS = 300;
 
 const tableDebug = {};
 const conversationMemory = new Map();
@@ -55,7 +63,58 @@ function buildSessionId({ sessionId, senderName, senderRole }) {
   return String(sessionId || `${senderRole || "Dispatcher"}:${senderName || "unknown"}`).trim();
 }
 
+function pruneConversationMemory() {
+  const now = Date.now();
+  for (const [sessionId, memory] of conversationMemory.entries()) {
+    if (!memory?.updatedAt || now - memory.updatedAt > MEMORY_TTL_MS) {
+      conversationMemory.delete(sessionId);
+    }
+  }
+
+  if (conversationMemory.size <= MEMORY_MAX_SESSIONS) return;
+
+  const oldestFirst = Array.from(conversationMemory.entries())
+    .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0));
+
+  while (oldestFirst.length && conversationMemory.size > MEMORY_MAX_SESSIONS) {
+    const [sessionId] = oldestFirst.shift();
+    conversationMemory.delete(sessionId);
+  }
+}
+
+function saveConversationMemoryToDisk() {
+  try {
+    pruneConversationMemory();
+    const payload = Object.fromEntries(conversationMemory.entries());
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(payload, null, 2), "utf8");
+  } catch (error) {
+    console.warn("Conversation memory save failed:", error.message);
+  }
+}
+
+function loadConversationMemoryFromDisk() {
+  try {
+    if (!fs.existsSync(MEMORY_FILE)) return;
+    const raw = fs.readFileSync(MEMORY_FILE, "utf8");
+    const payload = JSON.parse(raw || "{}");
+    for (const [sessionId, memory] of Object.entries(payload || {})) {
+      if (!sessionId || !memory || typeof memory !== "object") continue;
+      conversationMemory.set(sessionId, {
+        lastRoute: memory.lastRoute || null,
+        pendingConfirmation: Boolean(memory.pendingConfirmation),
+        confirmedRoute: memory.confirmedRoute || null,
+        lastAssistTopic: memory.lastAssistTopic || null,
+        updatedAt: Number(memory.updatedAt || Date.now())
+      });
+    }
+    pruneConversationMemory();
+  } catch (error) {
+    console.warn("Conversation memory load failed:", error.message);
+  }
+}
+
 function getConversationMemory(sessionId) {
+  pruneConversationMemory();
   if (!conversationMemory.has(sessionId)) {
     conversationMemory.set(sessionId, {
       lastRoute: null,
@@ -76,7 +135,11 @@ function saveConversationMemory(sessionId, memory) {
     lastAssistTopic: memory.lastAssistTopic || null,
     updatedAt: Date.now()
   });
+  saveConversationMemoryToDisk();
 }
+
+loadConversationMemoryFromDisk();
+setInterval(saveConversationMemoryToDisk, 1000 * 60 * 5).unref?.();
 
 function normalizeText(value) {
   return String(value || "").toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
