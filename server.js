@@ -11,13 +11,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-// Maurice (System Assistant)
-const MAURICE_ENABLED = process.env.MAURICE_ENABLED !== "false";
-const MAURICE_MODEL = process.env.MAURICE_MODEL || "llama-3.1-8b-instant";
-const MAURICE_MAX_TOKENS = Number(process.env.MAURICE_MAX_TOKENS || 800);
-const MAURICE_TEMPERATURE = Number(process.env.MAURICE_TEMPERATURE || 0.1);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+const MAURICE_ENABLED = process.env.MAURICE_ENABLED !== "false";
+const MAURICE_MODEL = process.env.MAURICE_MODEL || GROQ_MODEL;
+const MAURICE_MAX_TOKENS = Number(process.env.MAURICE_MAX_TOKENS || 800);
+const MAURICE_TEMPERATURE = Number(process.env.MAURICE_TEMPERATURE || 0.1);
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON || "";
@@ -29,6 +28,7 @@ const MEMORY_TTL_MS = 1000 * 60 * 60 * 12;
 const MEMORY_MAX_SESSIONS = 300;
 
 const tableDebug = {};
+const conversationMemory = new Map();
 const MAURICE_SYSTEM_PROMPT = `
 You are Maurice, the Zachangu system assistant.
 
@@ -65,138 +65,6 @@ JSON structure:
 }
 `;
 
-  if (!MAURICE_ENABLED) return null;
-
-  const payload = {
-    model: MAURICE_MODEL,
-    messages: [
-      { role: "system", content: MAURICE_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: JSON.stringify({
-          dispatcher_message: userMessage,
-          system_context: systemContext
-        })
-      }
-    ],
-    temperature: MAURICE_TEMPERATURE,
-    max_tokens: MAURICE_MAX_TOKENS,
-    response_format: { type: "json_object" }
-  };
-
-  const response = await fetch(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    }
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(`Maurice error: ${JSON.stringify(data)}`);
-  }
-
-  try {
-    return JSON.parse(data.choices?.[0]?.message?.content || "{}");
-  } catch (err) {
-    return {
-      intent: "unknown",
-      missing_data: ["maurice_parse_failed"],
-      needs_review: true,
-      confidence: 0
-    };
-  }
-}
-async function callMaurice(userMessage, systemContext = {}) {
-  if (!MAURICE_ENABLED) return null;
-
-  const payload = {
-    model: MAURICE_MODEL,
-    messages: [
-      { role: "system", content: MAURICE_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: JSON.stringify({
-          dispatcher_message: userMessage,
-          system_context: systemContext
-        })
-      }
-    ],
-    temperature: MAURICE_TEMPERATURE,
-    max_tokens: MAURICE_MAX_TOKENS,
-    response_format: { type: "json_object" }
-  };
-
-  const response = await fetch(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    }
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(`Maurice error: ${JSON.stringify(data)}`);
-  }
-
-  try {
-    return JSON.parse(data.choices?.[0]?.message?.content || "{}");
-  } catch (err) {
-    return {
-      intent: "unknown",
-      missing_data: ["maurice_parse_failed"],
-      needs_review: true,
-      confidence: 0
-    };
-  }
-}
-const conversationMemory = new Map();
-function shouldUseMaurice(message = "") {
-  const text = String(message).toLowerCase();
-
-  const hasRoutePattern =
-    text.includes(" from ") && text.includes(" to ");
-
-  const hasPricingIntent =
-    ["price", "fare", "cost", "charge", "how much", "estimate"].some((word) =>
-      text.includes(word)
-    );
-
-  const hasDispatchIntent =
-    ["driver", "dispatch", "book", "ride", "pickup", "dropoff", "drop"].some((word) =>
-      text.includes(word)
-    );
-
-  const hasDistanceIntent =
-    ["distance", "km", "how far", "route"].some((word) =>
-      text.includes(word)
-    );
-
-  const hasZoneIntent =
-    ["zone", "landmark", "market price", "available driver"].some((word) =>
-      text.includes(word)
-    );
-
-  return (
-    hasRoutePattern ||
-    hasPricingIntent ||
-    hasDispatchIntent ||
-    hasDistanceIntent ||
-    hasZoneIntent
-  );
-}
 app.get("/", (req, res) => {
   res.json({
     status: "Zachangu AI server is running",
@@ -311,6 +179,67 @@ function saveConversationMemory(sessionId, memory) {
 
 loadConversationMemoryFromDisk();
 setInterval(saveConversationMemoryToDisk, 1000 * 60 * 5).unref?.();
+
+function shouldUseMaurice(message = "") {
+  const text = String(message || "").toLowerCase();
+  const hasRoutePattern = text.includes(" from ") && text.includes(" to ");
+  const hasPricingIntent = ["price", "fare", "cost", "charge", "how much", "estimate"].some(word => text.includes(word));
+  const hasDispatchIntent = ["driver", "dispatch", "book", "ride", "pickup", "dropoff", "drop"].some(word => text.includes(word));
+  const hasDistanceIntent = ["distance", "km", "how far", "route"].some(word => text.includes(word));
+  const hasZoneIntent = ["zone", "landmark", "market price", "available driver"].some(word => text.includes(word));
+  return hasRoutePattern || hasPricingIntent || hasDispatchIntent || hasDistanceIntent || hasZoneIntent;
+}
+
+async function callMaurice(userMessage, systemContext = {}) {
+  if (!MAURICE_ENABLED || !GROQ_API_KEY) return null;
+
+  const payload = {
+    model: MAURICE_MODEL,
+    messages: [
+      { role: "system", content: MAURICE_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: JSON.stringify({
+          dispatcher_message: userMessage,
+          system_context: systemContext
+        })
+      }
+    ],
+    temperature: MAURICE_TEMPERATURE,
+    max_tokens: MAURICE_MAX_TOKENS,
+    response_format: { type: "json_object" }
+  };
+
+  const response = await fetchWithTimeout(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    },
+    12000
+  );
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`Maurice error: ${JSON.stringify(data)}`);
+  }
+
+  try {
+    const parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return {
+      intent: "unknown",
+      missing_data: ["maurice_parse_failed"],
+      needs_review: true,
+      confidence: 0
+    };
+  }
+}
 
 function normalizeText(value) {
   return String(value || "").toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
@@ -709,6 +638,7 @@ app.post("/ai/analyze", async (req, res) => {
   let cleanMessage = "";
   let context = null;
   let aiResult = {};
+  let mauriceData = null;
 
   try {
     const {
@@ -717,18 +647,6 @@ app.post("/ai/analyze", async (req, res) => {
       senderRole = "Dispatcher",
       sessionId: rawSessionId
     } = req.body || {};
-    const userMessage = message || "";
-
-// Decide if Maurice should be used
-const useMaurice = shouldUseMaurice(userMessage);
-    let mauriceData = null;
-
-if (useMaurice) {
-  mauriceData = await callMaurice(userMessage, {
-    senderName,
-    senderRole
-  });
-}
 
     if (!message || !String(message).trim()) {
       return res.status(400).json({ error: "Message is required" });
@@ -755,6 +673,35 @@ if (useMaurice) {
 
     context = await fetchZachanguContext(lookupMessage);
     const routeUnderstanding = context.route_understanding;
+    const useMaurice = shouldUseMaurice(cleanMessage);
+
+    if (useMaurice) {
+      try {
+        mauriceData = await callMaurice(cleanMessage, {
+          sender: `${senderName} (${senderRole})`,
+          memory: {
+            lastRoute: memory.lastRoute,
+            pendingConfirmation: memory.pendingConfirmation,
+            confirmedRoute: memory.confirmedRoute
+          },
+          route_understanding: routeUnderstanding,
+          landmarks: context.landmarks,
+          zones: context.zones,
+          market_prices: context.market_prices,
+          route_matrix: context.route_matrix,
+          pricing_rules: context.pricing_rules,
+          tapiwa_intelligence: context.tapiwa_intelligence
+        });
+      } catch (mauriceError) {
+        console.warn("Maurice failed:", mauriceError.message);
+        mauriceData = {
+          intent: "unknown",
+          missing_data: ["maurice_error"],
+          needs_review: true,
+          confidence: 0
+        };
+      }
+    }
 
     // ── Lift route intel into route understanding if matched ──────────────────
     const topRouteIntel = context.tapiwa_intelligence?.route_intelligence?.[0] || null;
@@ -845,6 +792,7 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       market_prices: context.market_prices,
       route_matrix: context.route_matrix,
       tapiwa_intelligence: context.tapiwa_intelligence,
+      maurice: mauriceData,
       zones: context.zones,
       risks: context.risks
     };
@@ -865,19 +813,9 @@ Respond ONLY with this JSON (no markdown, no extra keys):
         body: JSON.stringify({
           model: GROQ_MODEL,
           messages: [
-  { role: "system", content: systemPrompt },
-  {
-    role: "user",
-    content: mauriceData
-      ? JSON.stringify({
-          ...userPayload,
-          maurice: mauriceData,
-          note: "Use Maurice data for any trip, pricing, routing, or dispatch decisions. Do not guess."
-        })
-      : JSON.stringify(userPayload)
-  }
-],
-          
+            { role: "system", content: systemPrompt },
+            { role: "user", content: JSON.stringify(userPayload) }
+          ],
           response_format: { type: "json_object" },
           temperature: 0.55,   // slightly higher = more natural, less mechanical
           max_tokens: 300
@@ -928,11 +866,14 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       requires_supervisor_approval: riskLevel === "high" || aiResult.requires_supervisor_approval === true,
       used_data: {
         computed_fare: computedFare,
-        route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name }
+        route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name },
+        maurice: mauriceData
       },
       debug_memory: { sessionId, lastRoute:memory.lastRoute, pendingConfirmation:memory.pendingConfirmation, confirmedRoute:memory.confirmedRoute },
       debug_data_counts: context.data_counts,
-      debug_matched_counts: context.matched_counts
+      debug_matched_counts: context.matched_counts,
+      routed_to_maurice: useMaurice,
+      maurice: mauriceData
     };
 
     await saveAuditLog({
@@ -947,9 +888,7 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       raw_ai_response: aiResult,
       success: true
     });
-responsePayload.routed_to_maurice = useMaurice;
-responsePayload.maurice = mauriceData;
-    
+
     return res.json(responsePayload);
 
   } catch (error) {
