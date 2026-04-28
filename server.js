@@ -11,6 +11,11 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+// Maurice (System Assistant)
+const MAURICE_ENABLED = process.env.MAURICE_ENABLED !== "false";
+const MAURICE_MODEL = process.env.MAURICE_MODEL || "llama-3.1-8b-instant";
+const MAURICE_MAX_TOKENS = Number(process.env.MAURICE_MAX_TOKENS || 800);
+const MAURICE_TEMPERATURE = Number(process.env.MAURICE_TEMPERATURE || 0.1);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -24,8 +29,174 @@ const MEMORY_TTL_MS = 1000 * 60 * 60 * 12;
 const MEMORY_MAX_SESSIONS = 300;
 
 const tableDebug = {};
-const conversationMemory = new Map();
+const MAURICE_SYSTEM_PROMPT = `
+You are Maurice, the Zachangu system assistant.
 
+You work behind Tapiwa. You do not speak to customers or dispatchers directly.
+
+Return JSON only.
+
+Your job:
+- Extract pickup and dropoff
+- Identify vehicle type if mentioned
+- Identify intent
+- Match known landmarks and zones using provided system context
+- Identify missing data
+- Never invent prices, zones, landmarks, or distances.
+
+JSON structure:
+{
+  "intent": "",
+  "pickup_raw": "",
+  "dropoff_raw": "",
+  "pickup_landmark": "",
+  "dropoff_landmark": "",
+  "pickup_zone": "",
+  "dropoff_zone": "",
+  "vehicle_type": "",
+  "distance_km": null,
+  "distance_source": "",
+  "market_price_min": null,
+  "market_price_max": null,
+  "market_price_source": "",
+  "missing_data": [],
+  "needs_review": false,
+  "confidence": 0
+}
+`;
+async function callMaurice(userMessage, systemContext = {}) {
+  if (!MAURICE_ENABLED) return null;
+
+  const payload = {
+    model: MAURICE_MODEL,
+    messages: [
+      { role: "system", content: MAURICE_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: JSON.stringify({
+          dispatcher_message: userMessage,
+          system_context: systemContext
+        })
+      }
+    ],
+    temperature: MAURICE_TEMPERATURE,
+    max_tokens: MAURICE_MAX_TOKENS,
+    response_format: { type: "json_object" }
+  };
+
+  const response = await fetch(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(`Maurice error: ${JSON.stringify(data)}`);
+  }
+
+  try {
+    return JSON.parse(data.choices?.[0]?.message?.content || "{}");
+  } catch (err) {
+    return {
+      intent: "unknown",
+      missing_data: ["maurice_parse_failed"],
+      needs_review: true,
+      confidence: 0
+    };
+  }
+}
+async function callMaurice(userMessage, systemContext = {}) {
+  if (!MAURICE_ENABLED) return null;
+
+  const payload = {
+    model: MAURICE_MODEL,
+    messages: [
+      { role: "system", content: MAURICE_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: JSON.stringify({
+          dispatcher_message: userMessage,
+          system_context: systemContext
+        })
+      }
+    ],
+    temperature: MAURICE_TEMPERATURE,
+    max_tokens: MAURICE_MAX_TOKENS,
+    response_format: { type: "json_object" }
+  };
+
+  const response = await fetch(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(`Maurice error: ${JSON.stringify(data)}`);
+  }
+
+  try {
+    return JSON.parse(data.choices?.[0]?.message?.content || "{}");
+  } catch (err) {
+    return {
+      intent: "unknown",
+      missing_data: ["maurice_parse_failed"],
+      needs_review: true,
+      confidence: 0
+    };
+  }
+}
+const conversationMemory = new Map();
+function shouldUseMaurice(message = "") {
+  const text = String(message).toLowerCase();
+
+  const hasRoutePattern =
+    text.includes(" from ") && text.includes(" to ");
+
+  const hasPricingIntent =
+    ["price", "fare", "cost", "charge", "how much", "estimate"].some((word) =>
+      text.includes(word)
+    );
+
+  const hasDispatchIntent =
+    ["driver", "dispatch", "book", "ride", "pickup", "dropoff", "drop"].some((word) =>
+      text.includes(word)
+    );
+
+  const hasDistanceIntent =
+    ["distance", "km", "how far", "route"].some((word) =>
+      text.includes(word)
+    );
+
+  const hasZoneIntent =
+    ["zone", "landmark", "market price", "available driver"].some((word) =>
+      text.includes(word)
+    );
+
+  return (
+    hasRoutePattern ||
+    hasPricingIntent ||
+    hasDispatchIntent ||
+    hasDistanceIntent ||
+    hasZoneIntent
+  );
+}
 app.get("/", (req, res) => {
   res.json({
     status: "Zachangu AI server is running",
@@ -546,6 +717,18 @@ app.post("/ai/analyze", async (req, res) => {
       senderRole = "Dispatcher",
       sessionId: rawSessionId
     } = req.body || {};
+    const userMessage = message || "";
+
+// Decide if Maurice should be used
+const useMaurice = shouldUseMaurice(userMessage);
+    let mauriceData = null;
+
+if (useMaurice) {
+  mauriceData = await callMaurice(userMessage, {
+    senderName,
+    senderRole
+  });
+}
 
     if (!message || !String(message).trim()) {
       return res.status(400).json({ error: "Message is required" });
@@ -682,7 +865,17 @@ Respond ONLY with this JSON (no markdown, no extra keys):
         body: JSON.stringify({
           model: GROQ_MODEL,
           messages: [
-            { role: "system", content: systemPrompt },
+            {
+  role: "user",
+  content: mauriceData
+    ? JSON.stringify({
+        ...userPayload,
+        maurice: mauriceData,
+        note: "Use Maurice data for any trip, pricing, routing, or dispatch decisions. Do not guess."
+})
+      : JSON.stringify(userPayload)
+  }
+]
             { role: "user", content: JSON.stringify(userPayload) }
           ],
           response_format: { type: "json_object" },
@@ -754,7 +947,9 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       raw_ai_response: aiResult,
       success: true
     });
-
+responsePayload.routed_to_maurice = useMaurice;
+responsePayload.maurice = mauriceData;
+    
     return res.json(responsePayload);
 
   } catch (error) {
