@@ -1,9 +1,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 
 dotenv.config();
 
@@ -12,96 +9,18 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const TAPIWA_GROQ_API_KEY = process.env.TAPIWA_GROQ_API_KEY || process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
-const TAPIWA_MODEL = process.env.TAPIWA_MODEL || process.env.GROQ_MODEL || "llama-3.1-8b-instant";
-const MAURICE_ENABLED = process.env.MAURICE_ENABLED !== "false";
-const MAURICE_MODEL = process.env.MAURICE_MODEL || GROQ_MODEL;
-const MAURICE_MAX_TOKENS = Number(process.env.MAURICE_MAX_TOKENS || 800);
-const MAURICE_TEMPERATURE = Number(process.env.MAURICE_TEMPERATURE || 0.1);
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON || "";
 const SUPABASE_API_KEY = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const MEMORY_FILE = path.join(__dirname, "conversation-memory.json");
-const MEMORY_TTL_MS = 1000 * 60 * 60 * 12;
-const MEMORY_MAX_SESSIONS = 300;
 
 const tableDebug = {};
-const conversationMemory = new Map();
-const MAURICE_SYSTEM_PROMPT = `
-You are Maurice, the Zachangu system assistant.
 
-You work behind Tapiwa. You do not speak to customers or dispatchers directly.
-
-Return JSON only.
-
-Your job:
-- Extract pickup and dropoff
-- Identify vehicle type if mentioned
-- Identify intent
-- Match known landmarks and zones using provided system context
-- Identify missing data
-- Never invent prices, zones, landmarks, or distances.
-
-JSON structure:
-{
-  "intent": "",
-  "pickup_raw": "",
-  "dropoff_raw": "",
-  "pickup_landmark": "",
-  "dropoff_landmark": "",
-  "pickup_zone": "",
-  "dropoff_zone": "",
-  "vehicle_type": "",
-  "distance_km": null,
-  "distance_source": "",
-  "market_price_min": null,
-  "market_price_max": null,
-  "market_price_source": "",
-  "missing_data": [],
-  "needs_review": false,
-  "confidence": 0
-}
-`;
-
-app.get("/", (req, res) => {
-  res.json({
-    status: "Zachangu AI server is running",
-    groq_ready: Boolean(GROQ_API_KEY),
-    tapiwa_groq_ready: Boolean(TAPIWA_GROQ_API_KEY),
-    supabase_ready: Boolean(SUPABASE_URL && SUPABASE_API_KEY),
-    supabase_url_loaded: SUPABASE_URL || null,
-    tapiwa_intelligence_ready: true
-  });
-});
-
-app.get("/debug-ai-keys", (req, res) => {
-  res.json({
-    maurice_key_loaded: Boolean(GROQ_API_KEY),
-    tapiwa_key_loaded: Boolean(TAPIWA_GROQ_API_KEY),
-    maurice_model: MAURICE_MODEL,
-    tapiwa_model: TAPIWA_MODEL,
-    maurice_enabled: MAURICE_ENABLED
-  });
-});
-
-app.get("/debug-tables", async (req, res) => {
-  const tables = [
-    "zones","landmarks","pricing_rules","market_prices","route_matrix","risks",
-    "drivers","trip_requests","tapiwa_system_settings","tapiwa_market_price_rules",
-    "tapiwa_route_intelligence","tapiwa_zone_behavior","tapiwa_route_learning",
-    "tapiwa_price_outcomes","tapiwa_ai_audit_logs"
-  ];
-  const result = {};
-  for (const table of tables) {
-    const data = await supabaseFetch(table, 3);
-    result[table] = { rows_loaded: data.length, last_status: tableDebug[table] || null, sample: data.slice(0, 1) };
-  }
-  res.json(result);
-});
+// ── IN-PROCESS MEMORY CACHE (speed layer) ─────────────────────────────────────
+// Supabase is the source of truth; this is just a hot-cache to avoid DB round
+// trips on every message in an active session.
+const conversationMemoryCache = new Map();
 
 // ── UTILS ──────────────────────────────────────────────────────────────────────
 
@@ -111,148 +30,131 @@ function cleanBaseUrl() { return String(SUPABASE_URL || "").replace(/\/rest\/v1\
 function roundToNearest100(value) { return Math.round(Number(value || 0) / 100) * 100; }
 function cleanPrice(value) { return Math.max(3000, roundToNearest100(value)); }
 
+// FIX 1: sessionId is built server-side but the client must pass something
+// unique. We fall back to senderName+senderRole but strongly prefer an explicit
+// sessionId (e.g. WhatsApp group JID or a UUID generated on the client).
 function buildSessionId({ sessionId, senderName, senderRole }) {
-  return String(sessionId || `${senderRole || "Dispatcher"}:${senderName || "unknown"}`).trim();
+  const raw = String(sessionId || "").trim();
+  if (raw) return raw;
+  // Stable fallback: caller identity — not perfect but far better than the
+  // previous bug where every call used "Dispatcher:Dispatcher".
+  return `${String(senderRole || "Dispatcher").trim()}:${String(senderName || "unknown").trim()}`;
 }
 
-function pruneConversationMemory() {
-  const now = Date.now();
-  for (const [sessionId, memory] of conversationMemory.entries()) {
-    if (!memory?.updatedAt || now - memory.updatedAt > MEMORY_TTL_MS) {
-      conversationMemory.delete(sessionId);
-    }
-  }
-
-  if (conversationMemory.size <= MEMORY_MAX_SESSIONS) return;
-
-  const oldestFirst = Array.from(conversationMemory.entries())
-    .sort((a, b) => Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0));
-
-  while (oldestFirst.length && conversationMemory.size > MEMORY_MAX_SESSIONS) {
-    const [sessionId] = oldestFirst.shift();
-    conversationMemory.delete(sessionId);
-  }
+function emptyMemory() {
+  return {
+    lastRoute: null,
+    pendingConfirmation: false,
+    confirmedRoute: null,
+    lastAssistTopic: null,
+    updatedAt: Date.now()
+  };
 }
 
-function saveConversationMemoryToDisk() {
+// ── PERSISTENT MEMORY (Supabase) ───────────────────────────────────────────────
+// Table required (run once in Supabase SQL editor):
+//
+//   create table if not exists tapiwa_conversation_memory (
+//     session_id   text primary key,
+//     memory       jsonb not null default '{}',
+//     updated_at   timestamptz not null default now()
+//   );
+//
+// No extra columns needed — everything lives inside the `memory` jsonb field.
+
+async function loadMemoryFromDB(sessionId) {
+  if (!SUPABASE_URL || !SUPABASE_API_KEY) return null;
+  const url = `${cleanBaseUrl()}/rest/v1/tapiwa_conversation_memory?session_id=eq.${encodeURIComponent(sessionId)}&select=memory&limit=1`;
   try {
-    pruneConversationMemory();
-    const payload = Object.fromEntries(conversationMemory.entries());
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(payload, null, 2), "utf8");
-  } catch (error) {
-    console.warn("Conversation memory save failed:", error.message);
+    const response = await fetchWithTimeout(url, {
+      method: "GET",
+      headers: {
+        apikey: SUPABASE_API_KEY,
+        Authorization: `Bearer ${SUPABASE_API_KEY}`,
+        "Content-Type": "application/json"
+      }
+    }, 5000);
+    if (!response.ok) return null;
+    const rows = await response.json();
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    return rows[0]?.memory || null;
+  } catch {
+    return null;
   }
 }
 
-function loadConversationMemoryFromDisk() {
+async function saveMemoryToDB(sessionId, memory) {
+  if (!SUPABASE_URL || !SUPABASE_API_KEY) return;
+  const url = `${cleanBaseUrl()}/rest/v1/tapiwa_conversation_memory`;
   try {
-    if (!fs.existsSync(MEMORY_FILE)) return;
-    const raw = fs.readFileSync(MEMORY_FILE, "utf8");
-    const payload = JSON.parse(raw || "{}");
-    for (const [sessionId, memory] of Object.entries(payload || {})) {
-      if (!sessionId || !memory || typeof memory !== "object") continue;
-      conversationMemory.set(sessionId, {
-        lastRoute: memory.lastRoute || null,
-        pendingConfirmation: Boolean(memory.pendingConfirmation),
-        confirmedRoute: memory.confirmedRoute || null,
-        lastAssistTopic: memory.lastAssistTopic || null,
-        updatedAt: Number(memory.updatedAt || Date.now())
-      });
-    }
-    pruneConversationMemory();
-  } catch (error) {
-    console.warn("Conversation memory load failed:", error.message);
+    await fetchWithTimeout(url, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_API_KEY,
+        Authorization: `Bearer ${SUPABASE_API_KEY}`,
+        "Content-Type": "application/json",
+        // upsert: if session_id exists, update it
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        memory: memory,
+        updated_at: new Date().toISOString()
+      })
+    }, 5000);
+  } catch (err) {
+    console.warn("Memory DB save failed (non-fatal):", err.message);
   }
 }
 
-function getConversationMemory(sessionId) {
-  pruneConversationMemory();
-  if (!conversationMemory.has(sessionId)) {
-    conversationMemory.set(sessionId, {
-      lastRoute: null,
-      pendingConfirmation: false,
-      confirmedRoute: null,
-      lastAssistTopic: null,
-      updatedAt: Date.now()
-    });
+// Get memory: check in-process cache first, fall back to Supabase, then empty.
+async function getConversationMemory(sessionId) {
+  if (conversationMemoryCache.has(sessionId)) {
+    return conversationMemoryCache.get(sessionId);
   }
-  return conversationMemory.get(sessionId);
+  // Cache miss — try Supabase
+  const dbMemory = await loadMemoryFromDB(sessionId);
+  if (dbMemory) {
+    const mem = {
+      lastRoute: dbMemory.lastRoute || null,
+      pendingConfirmation: Boolean(dbMemory.pendingConfirmation),
+      confirmedRoute: dbMemory.confirmedRoute || null,
+      lastAssistTopic: dbMemory.lastAssistTopic || null,
+      updatedAt: dbMemory.updatedAt || Date.now()
+    };
+    conversationMemoryCache.set(sessionId, mem);
+    return mem;
+  }
+  // Brand new session
+  const fresh = emptyMemory();
+  conversationMemoryCache.set(sessionId, fresh);
+  return fresh;
 }
 
-function saveConversationMemory(sessionId, memory) {
-  conversationMemory.set(sessionId, {
+// Save memory: update in-process cache AND persist to Supabase (fire-and-forget).
+async function saveConversationMemory(sessionId, memory) {
+  const toSave = {
     lastRoute: memory.lastRoute || null,
     pendingConfirmation: Boolean(memory.pendingConfirmation),
     confirmedRoute: memory.confirmedRoute || null,
     lastAssistTopic: memory.lastAssistTopic || null,
     updatedAt: Date.now()
-  });
-  saveConversationMemoryToDisk();
-}
-
-loadConversationMemoryFromDisk();
-setInterval(saveConversationMemoryToDisk, 1000 * 60 * 5).unref?.();
-
-function shouldUseMaurice(message = "") {
-  const text = String(message || "").toLowerCase();
-  const hasRoutePattern = text.includes(" from ") && text.includes(" to ");
-  const hasPricingIntent = ["price", "fare", "cost", "charge", "how much", "estimate"].some(word => text.includes(word));
-  const hasDispatchIntent = ["driver", "dispatch", "book", "ride", "pickup", "dropoff", "drop"].some(word => text.includes(word));
-  const hasDistanceIntent = ["distance", "km", "how far", "route"].some(word => text.includes(word));
-  const hasZoneIntent = ["zone", "landmark", "market price", "available driver"].some(word => text.includes(word));
-  return hasRoutePattern || hasPricingIntent || hasDispatchIntent || hasDistanceIntent || hasZoneIntent;
-}
-
-async function callMaurice(userMessage, systemContext = {}) {
-  if (!MAURICE_ENABLED || !GROQ_API_KEY) return null;
-
-  const payload = {
-    model: MAURICE_MODEL,
-    messages: [
-      { role: "system", content: MAURICE_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: JSON.stringify({
-          dispatcher_message: userMessage,
-          system_context: systemContext
-        })
-      }
-    ],
-    temperature: MAURICE_TEMPERATURE,
-    max_tokens: MAURICE_MAX_TOKENS,
-    response_format: { type: "json_object" }
   };
-
-  const response = await fetchWithTimeout(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    },
-    12000
-  );
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(`Maurice error: ${JSON.stringify(data)}`);
-  }
-
-  try {
-    const parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}");
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return {
-      intent: "unknown",
-      missing_data: ["maurice_parse_failed"],
-      needs_review: true,
-      confidence: 0
-    };
-  }
+  // Hot-cache update (synchronous, instant)
+  conversationMemoryCache.set(sessionId, toSave);
+  // DB persist (async, non-blocking — failure is logged but won't crash the request)
+  saveMemoryToDB(sessionId, toSave).catch(() => {});
 }
+
+// Evict stale cache entries every 30 minutes to avoid memory leaks on long-running servers
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [key, val] of conversationMemoryCache.entries()) {
+    if ((val.updatedAt || 0) < cutoff) conversationMemoryCache.delete(key);
+  }
+}, 10 * 60 * 1000);
+
+// ── TEXT / ROUTE UTILS ─────────────────────────────────────────────────────────
 
 function normalizeText(value) {
   return String(value || "").toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
@@ -308,16 +210,20 @@ function extractRouteParts(message) {
   return null;
 }
 
+// FIX 2: was silently returning null when only raw text was available (no DB match)
+// Now falls back to pickupRaw/dropoffRaw so partial routes still get remembered.
 function routeSnapshotFromUnderstanding(routeUnderstanding) {
-  if (!routeUnderstanding || !routeUnderstanding.hasRoute || !routeUnderstanding.pickupRaw || !routeUnderstanding.dropoffRaw) return null;
+  if (!routeUnderstanding || !routeUnderstanding.hasRoute) return null;
+  if (!routeUnderstanding.pickupRaw && !routeUnderstanding.dropoffRaw) return null;
+
   const pickupName  = routeUnderstanding.pickup?.Landmark_Name  || null;
   const dropoffName = routeUnderstanding.dropoff?.Landmark_Name || null;
-  if (!pickupName && !dropoffName) return null;
+
   return {
-    pickup:    pickupName  || routeUnderstanding.pickupRaw,
-    dropoff:   dropoffName || routeUnderstanding.dropoffRaw,
-    pickupRaw:  routeUnderstanding.pickupRaw,
-    dropoffRaw: routeUnderstanding.dropoffRaw,
+    pickup:     pickupName  || routeUnderstanding.pickupRaw  || null,
+    dropoff:    dropoffName || routeUnderstanding.dropoffRaw || null,
+    pickupRaw:  routeUnderstanding.pickupRaw  || null,
+    dropoffRaw: routeUnderstanding.dropoffRaw || null,
     confidence: routeUnderstanding.confidence
   };
 }
@@ -325,147 +231,6 @@ function routeSnapshotFromUnderstanding(routeUnderstanding) {
 function routeToLookupMessage(route) {
   if (!route) return "";
   return `from ${route.pickupRaw || route.pickup || ""} to ${route.dropoffRaw || route.dropoff || ""}`.trim();
-}
-
-function takeItems(items, limit) {
-  return Array.isArray(items) ? items.slice(0, limit) : [];
-}
-
-function buildCompactAssistantContext(context, memory, mauriceData) {
-  const routeUnderstanding = context?.route_understanding || {};
-  const compact = {
-    route_understanding: {
-      hasRoute: !!routeUnderstanding.hasRoute,
-      confidence: routeUnderstanding.confidence || "low",
-      pickup: routeUnderstanding.pickup?.Landmark_Name || routeUnderstanding.pickupRaw || null,
-      dropoff: routeUnderstanding.dropoff?.Landmark_Name || routeUnderstanding.dropoffRaw || null,
-      note: routeUnderstanding.note || null
-    },
-    zones: takeItems(context?.zones, 3),
-    landmarks: takeItems(context?.landmarks, 4),
-    pricing_rules: takeItems(context?.pricing_rules, 2),
-    market_prices: takeItems(context?.market_prices, 3),
-    route_matrix: takeItems(context?.route_matrix, 3),
-    risks: takeItems(context?.risks, 2),
-    tapiwa_intelligence: {
-      market_price_rules: takeItems(context?.tapiwa_intelligence?.market_price_rules, 2),
-      route_intelligence: takeItems(context?.tapiwa_intelligence?.route_intelligence, 2),
-      zone_behavior: takeItems(context?.tapiwa_intelligence?.zone_behavior, 2),
-      route_learning: takeItems(context?.tapiwa_intelligence?.route_learning, 2)
-    },
-    data_counts: context?.data_counts || {},
-    matched_counts: context?.matched_counts || {},
-    memory: {
-      lastRoute: memory?.lastRoute || null,
-      pendingConfirmation: !!memory?.pendingConfirmation,
-      confirmedRoute: memory?.confirmedRoute || null
-    }
-  };
-
-  if (mauriceData) compact.maurice = mauriceData;
-  return compact;
-}
-
-function formatMwk(value) {
-  const amount = Number(value || 0);
-  if (!amount) return null;
-  return `MWK ${amount.toLocaleString("en-US")}`;
-}
-
-function buildDispatchNote({ computedFare, mauriceData, routeUnderstanding }) {
-  if (computedFare?.distance_km) {
-    return `Note: about ${computedFare.distance_km} km, so keep bike pricing only.`;
-  }
-  if (mauriceData?.missing_data?.includes("vehicle_type")) {
-    return "Note: confirm vehicle type before you lock the fare.";
-  }
-  if (routeUnderstanding?.confidence === "medium") {
-    return "Note: confirm the exact pickup before you quote finally.";
-  }
-  return "Note: confirm with the driver if traffic or weather changes the run.";
-}
-
-function buildPriceReply({ amountText, noteText, rangeText = "" }) {
-  const head = rangeText || amountText;
-  return noteText ? `${head}\n${noteText}` : head;
-}
-
-function buildLocalTapiwaFallback({ cleanMessage, computedFare, routeUnderstanding, mauriceData, memory }) {
-  const text = normalizeText(cleanMessage);
-  const greeting = /\b(hello|hi|hey|morning|goodmorning|good morning|afternoon|good afternoon|evening|good evening)\b/.test(text);
-
-  if (greeting && !isPricingLikeMessage(cleanMessage) && !isExplicitRouteMessage(cleanMessage)) {
-    return {
-      ignored: false,
-      category: "general_update",
-      risk_level: "low",
-      internal_summary: "Local greeting fallback",
-      team_message: "Morning all! 🌞",
-      requires_supervisor_approval: false
-    };
-  }
-
-  if (computedFare?.recommended_mwk) {
-    const amountText = formatMwk(computedFare.recommended_mwk);
-    return {
-      ignored: false,
-      category: "pricing_issue",
-      risk_level: "low",
-      internal_summary: `Computed fare: ${amountText}`,
-      team_message: buildPriceReply({
-        amountText,
-        noteText: buildDispatchNote({ computedFare, mauriceData, routeUnderstanding })
-      }),
-      requires_supervisor_approval: false
-    };
-  }
-
-  if (mauriceData?.market_price_min || mauriceData?.market_price_max) {
-    const min = Number(mauriceData.market_price_min || 0);
-    const max = Number(mauriceData.market_price_max || 0);
-    const estimate = max ? cleanPrice((min + max) / 2) : cleanPrice(min);
-    const hasClearRoute = routeUnderstanding?.confidence === "high" || Number(mauriceData.confidence || 0) >= 0.75;
-    const rangeText = min && max ? `${formatMwk(min)} - ${formatMwk(max)}` : formatMwk(estimate);
-    return {
-      ignored: false,
-      category: "pricing_issue",
-      risk_level: hasClearRoute ? "low" : "medium",
-      internal_summary: "Local market-price fallback",
-      team_message: hasClearRoute
-        ? buildPriceReply({
-            amountText: formatMwk(estimate),
-            rangeText,
-            noteText: buildDispatchNote({ computedFare, mauriceData, routeUnderstanding })
-          })
-        : buildPriceReply({
-            amountText: formatMwk(estimate),
-            noteText: "Note: confirm the exact route before you quote finally."
-          }),
-      requires_supervisor_approval: false
-    };
-  }
-
-  if (routeUnderstanding?.confidence === "medium" || memory?.pendingConfirmation) {
-    const pickup = mauriceData?.pickup_landmark || routeUnderstanding?.pickup?.Landmark_Name || routeUnderstanding?.pickupRaw || memory?.lastRoute?.pickupRaw || "the pickup";
-    const dropoff = mauriceData?.dropoff_landmark || routeUnderstanding?.dropoff?.Landmark_Name || routeUnderstanding?.dropoffRaw || memory?.lastRoute?.dropoffRaw || "the dropoff";
-    return {
-      ignored: false,
-      category: "pricing_issue",
-      risk_level: "medium",
-      internal_summary: "Route needs confirmation",
-      team_message: `Confirm for me: ${pickup} to ${dropoff}?`,
-      requires_supervisor_approval: false
-    };
-  }
-
-  return {
-    ignored: false,
-    category: "system_issue",
-    risk_level: "low",
-    internal_summary: "Local fallback",
-    team_message: "I need a clearer pickup and dropoff before I quote that.",
-    requires_supervisor_approval: false
-  };
 }
 
 // ── NETWORK ────────────────────────────────────────────────────────────────────
@@ -737,7 +502,7 @@ async function fetchZachanguContext(userMessage) {
   };
 }
 
-// ── FARE CALCULATION (data only — never used to bypass Groq) ──────────────────
+// ── FARE CALCULATION ───────────────────────────────────────────────────────────
 
 function calculateBasicFare(context) {
   const ru = context.route_understanding||{};
@@ -786,13 +551,48 @@ async function saveAuditLog(payload) {
   });
 }
 
+// ── DEBUG & HEALTH ROUTES ──────────────────────────────────────────────────────
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "Zachangu AI server is running",
+    groq_ready: Boolean(GROQ_API_KEY),
+    supabase_ready: Boolean(SUPABASE_URL && SUPABASE_API_KEY),
+    supabase_url_loaded: SUPABASE_URL || null,
+    tapiwa_intelligence_ready: true
+  });
+});
+
+app.get("/debug-tables", async (req, res) => {
+  const tables = [
+    "zones","landmarks","pricing_rules","market_prices","route_matrix","risks",
+    "drivers","trip_requests","tapiwa_system_settings","tapiwa_market_price_rules",
+    "tapiwa_route_intelligence","tapiwa_zone_behavior","tapiwa_route_learning",
+    "tapiwa_price_outcomes","tapiwa_ai_audit_logs","tapiwa_conversation_memory"
+  ];
+  const result = {};
+  for (const table of tables) {
+    const data = await supabaseFetch(table, 3);
+    result[table] = { rows_loaded: data.length, last_status: tableDebug[table] || null, sample: data.slice(0, 1) };
+  }
+  res.json(result);
+});
+
+// Handy endpoint to inspect live memory for a session without digging through Supabase
+app.get("/debug-memory/:sessionId", async (req, res) => {
+  const sessionId = decodeURIComponent(req.params.sessionId || "");
+  if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+  const cached = conversationMemoryCache.get(sessionId) || null;
+  const db = await loadMemoryFromDB(sessionId);
+  res.json({ sessionId, in_process_cache: cached, supabase: db });
+});
+
 // ── MAIN ENDPOINT ──────────────────────────────────────────────────────────────
 
 app.post("/ai/analyze", async (req, res) => {
   let cleanMessage = "";
   let context = null;
   let aiResult = {};
-  let mauriceData = null;
 
   try {
     const {
@@ -812,10 +612,11 @@ app.post("/ai/analyze", async (req, res) => {
 
     cleanMessage = cleanTapiwaMessage(message);
     const sessionId = buildSessionId({ sessionId: rawSessionId, senderName, senderRole });
-    const memory = getConversationMemory(sessionId);
 
-    // ── Resolve context — always fetch so Groq has real data ──────────────────
-    // If this is a follow-up about a confirmed route, look up that route
+    // FIX 3: Load memory BEFORE any processing (async, pulls from Supabase on cache miss)
+    const memory = await getConversationMemory(sessionId);
+
+    // ── Resolve lookup message ────────────────────────────────────────────────
     const isFollowUp = isFollowUpRouteMessage(cleanMessage);
     const hasExplicitRoute = isExplicitRouteMessage(cleanMessage);
     const isCorrection = isCorrectionMessage(cleanMessage);
@@ -827,25 +628,6 @@ app.post("/ai/analyze", async (req, res) => {
 
     context = await fetchZachanguContext(lookupMessage);
     const routeUnderstanding = context.route_understanding;
-    const useMaurice = shouldUseMaurice(cleanMessage);
-    const compactContext = buildCompactAssistantContext(context, memory, null);
-
-    if (useMaurice) {
-      try {
-        mauriceData = await callMaurice(cleanMessage, {
-          sender: `${senderName} (${senderRole})`,
-          context: compactContext
-        });
-      } catch (mauriceError) {
-        console.warn("Maurice failed:", mauriceError.message);
-        mauriceData = {
-          intent: "unknown",
-          missing_data: ["maurice_error"],
-          needs_review: true,
-          confidence: 0
-        };
-      }
-    }
 
     // ── Lift route intel into route understanding if matched ──────────────────
     const topRouteIntel = context.tapiwa_intelligence?.route_intelligence?.[0] || null;
@@ -856,27 +638,42 @@ app.post("/ai/analyze", async (req, res) => {
       routeUnderstanding.note = "Route resolved from Tapiwa route intelligence.";
     }
 
-    // ── Update conversation memory ────────────────────────────────────────────
+    // ── Update memory state ───────────────────────────────────────────────────
     const detectedRoute = routeSnapshotFromUnderstanding(routeUnderstanding);
+
+    // FIX 4: Build the updated memory object but DON'T save it yet —
+    // we save ONLY after Groq succeeds so a Groq failure doesn't corrupt state.
+    const updatedMemory = { ...memory };
+
     if (detectedRoute) {
-      memory.lastRoute = { ...detectedRoute };
+      updatedMemory.lastRoute = { ...detectedRoute };
       if (isCorrection) {
-        memory.confirmedRoute = detectedRoute.confidence==="high" ? { ...detectedRoute } : null;
-        memory.pendingConfirmation = detectedRoute.confidence==="medium";
-      } else if (detectedRoute.confidence==="high") {
-        memory.confirmedRoute = { ...detectedRoute };
-        memory.pendingConfirmation = false;
-      } else if (detectedRoute.confidence==="medium") {
-        memory.confirmedRoute = null;
-        memory.pendingConfirmation = true;
+        updatedMemory.confirmedRoute = detectedRoute.confidence === "high" ? { ...detectedRoute } : null;
+        updatedMemory.pendingConfirmation = detectedRoute.confidence === "medium";
+      } else if (detectedRoute.confidence === "high") {
+        updatedMemory.confirmedRoute = { ...detectedRoute };
+        updatedMemory.pendingConfirmation = false;
+      } else if (detectedRoute.confidence === "medium") {
+        updatedMemory.confirmedRoute = null;
+        updatedMemory.pendingConfirmation = true;
       } else {
-        memory.confirmedRoute = null;
-        memory.pendingConfirmation = false;
+        updatedMemory.confirmedRoute = null;
+        updatedMemory.pendingConfirmation = false;
       }
     }
-    saveConversationMemory(sessionId, memory);
 
-    // ── Calculate fare — passed to Groq as data, not as a bypass ─────────────
+    // Handle "yes/confirmed" replies against a pending route
+    const lowerClean = normalizeText(cleanMessage);
+    if (
+      memory.pendingConfirmation &&
+      memory.lastRoute &&
+      /^(yes|yeah|yep|confirmed|correct|that.?s right|ok|okay|yah|yas|nod)/.test(lowerClean)
+    ) {
+      updatedMemory.confirmedRoute = { ...memory.lastRoute, confidence: "high" };
+      updatedMemory.pendingConfirmation = false;
+    }
+
+    // ── Fare calculation ──────────────────────────────────────────────────────
     const computedFare = calculateBasicFare(context);
 
     // ── Build Groq prompt ─────────────────────────────────────────────────────
@@ -889,15 +686,14 @@ YOUR VOICE:
 - Speak English only. Clear, plain English that anyone on the team can follow.
 - Typos and shorthand are fine — you speak the way the team speaks.
 - Never use bullet points, formal labels, or report-style language.
-- Max 2 short lines. If you need 3, make sure every word earns its place.
+- Max 1-2 sentences. If you need 3, make sure every word earns its place.
 - Never start with "Sure," "Certainly," "Of course," or anything robotic.
 - Never repeat the exact phrasing of the question back.
 - Use emoji to feel natural
 
 WHAT YOU DO:
-- Pricing: Use computed_fare if available. Give a number first, then one short recommendation or caution line if it helps dispatch.
+- Pricing: Use computed_fare if available. Give a number. If you're not sure, say so simply and flag it.
   Format prices as "MWK X,XXX" — always round to nearest MWK 100, min MWK 3,000.
-- If you only have a price range, give the range and one short note.
 - Route confirmation: If confidence is "medium", ask one short question to confirm.
   If "low", just say you need clearer pickup and dropoff.
 - Dispatch help: Respond naturally — no step-by-step unless asked.
@@ -920,26 +716,31 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       sender: `${senderName} (${senderRole})`,
       session_id: sessionId,
       message: cleanMessage,
-      memory: compactContext.memory,
-      route_understanding: compactContext.route_understanding,
+      memory: {
+        lastRoute: updatedMemory.lastRoute,
+        pendingConfirmation: updatedMemory.pendingConfirmation,
+        confirmedRoute: updatedMemory.confirmedRoute
+      },
+      route_understanding: {
+        hasRoute: routeUnderstanding.hasRoute,
+        confidence: routeUnderstanding.confidence,
+        pickup: routeUnderstanding.pickup?.Landmark_Name || routeUnderstanding.pickupRaw || null,
+        dropoff: routeUnderstanding.dropoff?.Landmark_Name || routeUnderstanding.dropoffRaw || null,
+        note: routeUnderstanding.note
+      },
       computed_fare: computedFare || null,
-      pricing_rules: compactContext.pricing_rules,
-      market_prices: compactContext.market_prices,
-      route_matrix: compactContext.route_matrix,
-      tapiwa_intelligence: compactContext.tapiwa_intelligence,
-      maurice: mauriceData,
-      zones: compactContext.zones,
-      landmarks: compactContext.landmarks,
-      risks: compactContext.risks,
-      data_counts: compactContext.data_counts,
-      matched_counts: compactContext.matched_counts
+      pricing_rules: context.pricing_rules,
+      market_prices: context.market_prices,
+      route_matrix: context.route_matrix,
+      tapiwa_intelligence: context.tapiwa_intelligence,
+      zones: context.zones,
+      risks: context.risks
     };
 
     // ── Call Groq ─────────────────────────────────────────────────────────────
-    if (!TAPIWA_GROQ_API_KEY) {
-      // No Tapiwa key — send a minimal helpful fallback but still log
-      const fallback = { ignored:false, category:"system_issue", risk_level:"low", internal_summary:"No Tapiwa API key", team_message:"I'm not connected to the AI engine right now — someone check the server config.", requires_supervisor_approval:false, used_data:{} };
-      await saveAuditLog({ user_message:message, clean_message:cleanMessage, ai_category:"system_issue", risk_level:"low", team_message:fallback.team_message, success:false, error_message:"TAPIWA_GROQ_API_KEY not set" });
+    if (!GROQ_API_KEY) {
+      const fallback = { ignored:false, category:"system_issue", risk_level:"low", internal_summary:"No Groq API key", team_message:"I'm not connected to the AI engine right now — someone check the server config.", requires_supervisor_approval:false, used_data:{} };
+      await saveAuditLog({ user_message:message, clean_message:cleanMessage, ai_category:"system_issue", risk_level:"low", team_message:fallback.team_message, success:false, error_message:"GROQ_API_KEY not set" });
       return res.json(fallback);
     }
 
@@ -947,15 +748,15 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       "https://api.groq.com/openai/v1/chat/completions",
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${TAPIWA_GROQ_API_KEY}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: TAPIWA_MODEL,
+          model: GROQ_MODEL,
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: JSON.stringify(userPayload) }
           ],
           response_format: { type: "json_object" },
-          temperature: 0.55,   // slightly higher = more natural, less mechanical
+          temperature: 0.55,
           max_tokens: 300
         })
       },
@@ -966,43 +767,8 @@ Respond ONLY with this JSON (no markdown, no extra keys):
 
     if (!groqResponse.ok) {
       console.error("GROQ API ERROR:", groqResponse.status, groqData);
-      const fallbackPayload = buildLocalTapiwaFallback({
-        cleanMessage,
-        computedFare,
-        routeUnderstanding,
-        mauriceData,
-        memory
-      });
-      await saveAuditLog({
-        user_message:message,
-        clean_message:cleanMessage,
-        success:false,
-        error_message:"Groq API error",
-        raw_ai_response:groqData,
-        ai_category:fallbackPayload.category,
-        risk_level:fallbackPayload.risk_level,
-        team_message:fallbackPayload.team_message,
-        internal_summary:fallbackPayload.internal_summary,
-        used_data:{
-          computed_fare: computedFare,
-          route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name },
-          maurice: mauriceData
-        }
-      });
-      return res.json({
-        ...fallbackPayload,
-        used_data: {
-          computed_fare: computedFare,
-          route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name },
-          maurice: mauriceData
-        },
-        debug_memory: { sessionId, lastRoute:memory.lastRoute, pendingConfirmation:memory.pendingConfirmation, confirmedRoute:memory.confirmedRoute },
-        debug_data_counts: context.data_counts,
-        debug_matched_counts: context.matched_counts,
-        routed_to_maurice: useMaurice,
-        maurice: mauriceData,
-        fallback_source: "local_tapiwa"
-      });
+      await saveAuditLog({ user_message:message, clean_message:cleanMessage, success:false, error_message:"Groq API error", raw_ai_response:groqData });
+      return res.json({ ignored:false, category:"system_issue", risk_level:"low", internal_summary:"Groq API error", team_message:"Something went off on my end — try that again.", requires_supervisor_approval:false, used_data:{} });
     }
 
     try {
@@ -1010,6 +776,9 @@ Respond ONLY with this JSON (no markdown, no extra keys):
     } catch {
       aiResult = {};
     }
+
+    // FIX 4 continued: Groq succeeded — NOW commit the updated memory
+    await saveConversationMemory(sessionId, updatedMemory);
 
     // ── Sanitise Groq output ──────────────────────────────────────────────────
     const allowedCategories = ["incident","pricing_issue","driver_issue","traffic","system_issue","general_update"];
@@ -1039,14 +808,20 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       requires_supervisor_approval: riskLevel === "high" || aiResult.requires_supervisor_approval === true,
       used_data: {
         computed_fare: computedFare,
-        route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name },
-        maurice: mauriceData
+        route_understanding: {
+          confidence: routeUnderstanding.confidence,
+          pickup: routeUnderstanding.pickup?.Landmark_Name || routeUnderstanding.pickupRaw,
+          dropoff: routeUnderstanding.dropoff?.Landmark_Name || routeUnderstanding.dropoffRaw
+        }
       },
-      debug_memory: { sessionId, lastRoute:memory.lastRoute, pendingConfirmation:memory.pendingConfirmation, confirmedRoute:memory.confirmedRoute },
+      debug_memory: {
+        sessionId,
+        lastRoute: updatedMemory.lastRoute,
+        pendingConfirmation: updatedMemory.pendingConfirmation,
+        confirmedRoute: updatedMemory.confirmedRoute
+      },
       debug_data_counts: context.data_counts,
-      debug_matched_counts: context.matched_counts,
-      routed_to_maurice: useMaurice,
-      maurice: mauriceData
+      debug_matched_counts: context.matched_counts
     };
 
     await saveAuditLog({
