@@ -4,18 +4,25 @@ import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { rateLimit } from "express-rate-limit";
 
 dotenv.config();
 
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+const NODE_ENV = String(process.env.NODE_ENV || "development");
+const IS_PROD = NODE_ENV === "production";
+const PERSONA_VERSION = "2026-05-05.1";
+const ENABLE_STRICT_OUTPUT_VALIDATION = process.env.ENABLE_STRICT_OUTPUT_VALIDATION !== "false";
+const ENABLE_SHARED_PERSONA_CONFIG = process.env.ENABLE_SHARED_PERSONA_CONFIG !== "false";
+const ENABLE_SECURE_DEBUG_ROUTES = process.env.ENABLE_SECURE_DEBUG_ROUTES === "true";
+const EXPOSE_DEBUG_PAYLOADS = process.env.EXPOSE_DEBUG_PAYLOADS === "true" && !IS_PROD;
+const REQUIRE_API_AUTH = process.env.REQUIRE_API_AUTH === "true";
+const API_SERVER_KEY = String(process.env.AI_SERVER_API_KEY || "");
+const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ALLOWED_ORIGINS || "");
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const TAPIWA_GROQ_API_KEY = process.env.TAPIWA_GROQ_API_KEY;
-const GEMMA_API_KEY = process.env.GEMMA_API_KEY || process.env.GEMINI_API_KEY || "";
-const TAPIWA_PROVIDER = "gemma";
-const TAPIWA_MODEL = process.env.GEMMA_MODEL || process.env.TAPIWA_MODEL || "gemini-2.5-flash";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GEMMA_API_KEY || "";
+const TAPIWA_PROVIDER = "gemini";
+const TAPIWA_MODEL = process.env.GEMINI_MODEL || process.env.GEMMA_MODEL || process.env.TAPIWA_MODEL || "gemini-2.5-flash";
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const MAURICE_ENABLED = process.env.MAURICE_ENABLED !== "false";
 const MAURICE_MODEL = process.env.MAURICE_MODEL || GROQ_MODEL;
@@ -30,9 +37,91 @@ const __dirname = path.dirname(__filename);
 const MEMORY_FILE = path.join(__dirname, "conversation-memory.json");
 const MEMORY_TTL_MS = 1000 * 60 * 60 * 12;
 const MEMORY_MAX_SESSIONS = 300;
+const TABLE_CACHE_TTL_MS = Number(process.env.TABLE_CACHE_TTL_MS || 60_000);
+const STATIC_TABLE_CACHE = new Set([
+  "zones",
+  "landmarks",
+  "pricing_rules",
+  "market_prices",
+  "route_matrix",
+  "risks",
+  "tapiwa_system_settings",
+  "tapiwa_market_price_rules",
+  "tapiwa_route_intelligence",
+  "tapiwa_zone_behavior",
+  "tapiwa_route_learning"
+]);
+
+function parseCsvList(value = "") {
+  return String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const allowedCorsOrigins = parseCsvList(CORS_ALLOWED_ORIGINS);
+const allowAllCorsOrigins = allowedCorsOrigins.includes("*");
+function isOriginAllowed(origin) {
+  if (!allowedCorsOrigins.length) return true;
+  if (!origin) return true;
+  if (allowAllCorsOrigins) return true;
+  return allowedCorsOrigins.includes(origin);
+}
+
+const app = express();
+app.use(cors({
+  origin(origin, callback) {
+    if (isOriginAllowed(origin)) return callback(null, true);
+    return callback(new Error("CORS blocked for origin."));
+  }
+}));
+app.use(express.json({ limit: "1mb" }));
+app.use((req, res, next) => {
+  const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  req.requestId = requestId;
+  const startedAt = Date.now();
+  res.setHeader("x-request-id", requestId);
+  res.on("finish", () => {
+    if (req.path === "/") return;
+    console.log(JSON.stringify({
+      request_id: requestId,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      duration_ms: Date.now() - startedAt
+    }));
+  });
+  next();
+});
+
+const analyzeRateLimiter = rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
+  limit: Number(process.env.RATE_LIMIT_MAX || 120),
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please try again shortly." }
+});
+app.use("/ai/analyze", analyzeRateLimiter);
+
+function requireApiAuth(req, res, next) {
+  if (!REQUIRE_API_AUTH) return next();
+  if (!API_SERVER_KEY) {
+    return res.status(503).json({ error: "Server auth key is not configured." });
+  }
+  const incoming = String(req.headers["x-api-key"] || req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (incoming && incoming === API_SERVER_KEY) return next();
+  return res.status(401).json({ error: "Unauthorized request." });
+}
+
+if (IS_PROD && REQUIRE_API_AUTH && !API_SERVER_KEY) {
+  console.warn("REQUIRE_API_AUTH is active but AI_SERVER_API_KEY is missing.");
+}
 
 const tableDebug = {};
 const conversationMemory = new Map();
+const tableCache = new Map();
+let memorySaveTimer = null;
+let memorySaveInFlight = false;
 const MAURICE_SYSTEM_PROMPT = `
 You are Maurice, the Zachangu system assistant.
 
@@ -69,50 +158,69 @@ JSON structure:
 }
 `;
 
-app.get("/", (req, res) => {
-  res.json({
+function buildHealthPayload() {
+  const tapiwaReady = Boolean(GEMINI_API_KEY);
+  const mauriceReady = Boolean(GROQ_API_KEY);
+  return {
     status: "Zachangu AI server is running",
-    maurice_groq_ready: Boolean(GROQ_API_KEY),
-    gemma_ready: Boolean(GEMMA_API_KEY),
+    persona_version: PERSONA_VERSION,
     tapiwa_provider: TAPIWA_PROVIDER,
     tapiwa_model: TAPIWA_MODEL,
+    groq_ready: mauriceReady,
+    tapiwa_groq_ready: tapiwaReady,
+    tapiwa_ready: tapiwaReady,
+    maurice_ready: mauriceReady,
+    maurice_groq_ready: mauriceReady,
+    gemma_ready: tapiwaReady,
+    gemini_ready: tapiwaReady,
     supabase_ready: Boolean(SUPABASE_URL && SUPABASE_API_KEY),
     supabase_url_loaded: cleanBaseUrl() || null,
     tapiwa_intelligence_ready: true
+  };
+}
+
+app.get("/", (req, res) => {
+  res.json(buildHealthPayload());
+});
+
+if (ENABLE_SECURE_DEBUG_ROUTES) {
+  app.get("/debug-ai-keys", requireApiAuth, (req, res) => {
+    res.json({
+      gemini_key_loaded: Boolean(GEMINI_API_KEY),
+      maurice_key_loaded: Boolean(GROQ_API_KEY),
+      maurice_model: MAURICE_MODEL,
+      tapiwa_model: TAPIWA_MODEL,
+      maurice_enabled: MAURICE_ENABLED,
+      require_api_auth: REQUIRE_API_AUTH,
+      strict_output_validation: ENABLE_STRICT_OUTPUT_VALIDATION
+    });
   });
-});
-app.get("/debug-ai-keys", (req, res) => {
-  res.json({
-    maurice_key_loaded: Boolean(GROQ_API_KEY),
-    tapiwa_key_loaded: Boolean(TAPIWA_GROQ_API_KEY),
-    maurice_model: MAURICE_MODEL,
-    tapiwa_model: TAPIWA_MODEL,
-    maurice_enabled: MAURICE_ENABLED
+
+  app.get("/env-check", requireApiAuth, (req, res) => {
+    res.json({
+      gemini_api_key_loaded: Boolean(GEMINI_API_KEY),
+      gemini_model: TAPIWA_MODEL,
+      maurice_groq_ready: Boolean(GROQ_API_KEY),
+      supabase_ready: Boolean(SUPABASE_URL && SUPABASE_API_KEY),
+      persona_version: PERSONA_VERSION
+    });
   });
-});
-app.get("/env-check", (req, res) => {
-  res.json({
-    gemma_api_key_loaded: Boolean(GEMMA_API_KEY),
-    gemma_key_prefix: GEMMA_API_KEY ? GEMMA_API_KEY.slice(0, 4) : null,
-    gemma_model: TAPIWA_MODEL,
-    maurice_groq_ready: Boolean(GROQ_API_KEY),
-    supabase_ready: Boolean(SUPABASE_URL && SUPABASE_API_KEY)
+
+  app.get("/debug-tables", requireApiAuth, async (req, res) => {
+    const tables = [
+      "zones","landmarks","pricing_rules","market_prices","route_matrix","risks",
+      "drivers","trip_requests","tapiwa_system_settings","tapiwa_market_price_rules",
+      "tapiwa_route_intelligence","tapiwa_zone_behavior","tapiwa_route_learning",
+      "tapiwa_price_outcomes","tapiwa_ai_audit_logs"
+    ];
+    const result = {};
+    for (const table of tables) {
+      const data = await supabaseFetch(table, 3, { bypassCache: true });
+      result[table] = { rows_loaded: data.length, last_status: tableDebug[table] || null, sample: data.slice(0, 1) };
+    }
+    res.json(result);
   });
-});
-app.get("/debug-tables", async (req, res) => {
-  const tables = [
-    "zones","landmarks","pricing_rules","market_prices","route_matrix","risks",
-    "drivers","trip_requests","tapiwa_system_settings","tapiwa_market_price_rules",
-    "tapiwa_route_intelligence","tapiwa_zone_behavior","tapiwa_route_learning",
-    "tapiwa_price_outcomes","tapiwa_ai_audit_logs"
-  ];
-  const result = {};
-  for (const table of tables) {
-    const data = await supabaseFetch(table, 3);
-    result[table] = { rows_loaded: data.length, last_status: tableDebug[table] || null, sample: data.slice(0, 1) };
-  }
-  res.json(result);
-});
+}
 
 // ── UTILS ──────────────────────────────────────────────────────────────────────
 
@@ -145,14 +253,26 @@ function pruneConversationMemory() {
   }
 }
 
-function saveConversationMemoryToDisk() {
+async function saveConversationMemoryToDisk() {
+  if (memorySaveInFlight) return;
+  memorySaveInFlight = true;
   try {
     pruneConversationMemory();
     const payload = Object.fromEntries(conversationMemory.entries());
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(payload, null, 2), "utf8");
+    await fs.promises.writeFile(MEMORY_FILE, JSON.stringify(payload, null, 2), "utf8");
   } catch (error) {
     console.warn("Conversation memory save failed:", error.message);
+  } finally {
+    memorySaveInFlight = false;
   }
+}
+
+function scheduleConversationMemorySave() {
+  if (memorySaveTimer) clearTimeout(memorySaveTimer);
+  memorySaveTimer = setTimeout(() => {
+    memorySaveTimer = null;
+    saveConversationMemoryToDisk().catch(() => {});
+  }, 250);
 }
 
 function loadConversationMemoryFromDisk() {
@@ -219,11 +339,13 @@ function saveConversationMemory(sessionId, memory) {
     lastResponseAt: Number(memory.lastResponseAt || 0),
     updatedAt: Date.now()
   });
-  saveConversationMemoryToDisk();
+  scheduleConversationMemorySave();
 }
 
 loadConversationMemoryFromDisk();
-setInterval(saveConversationMemoryToDisk, 1000 * 60 * 5).unref?.();
+setInterval(() => {
+  saveConversationMemoryToDisk().catch(() => {});
+}, 1000 * 60 * 5).unref?.();
 
 
 // ── TAPIWA GEMINI PERSONALITY HELPERS ─────────────────────────────────────────
@@ -396,10 +518,10 @@ function extractJsonObject(text = "") {
 }
 
 async function callTapiwaGemini({ systemPrompt, userPayload, operationalMode, highRisk }) {
-  if (!GEMMA_API_KEY) throw new Error("GEMMA_API_KEY is missing");
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing");
 
   const response = await fetchWithTimeout(
-    `https://generativelanguage.googleapis.com/v1beta/models/${TAPIWA_MODEL}:generateContent?key=${GEMMA_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${TAPIWA_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -575,7 +697,17 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   finally { clearTimeout(timeout); }
 }
 
-async function supabaseFetch(table, limit = 20) {
+async function supabaseFetch(table, limit = 20, options = {}) {
+  const bypassCache = Boolean(options?.bypassCache);
+  const cacheKey = `${table}:${limit}`;
+  const now = Date.now();
+  if (!bypassCache && STATIC_TABLE_CACHE.has(table)) {
+    const cached = tableCache.get(cacheKey);
+    if (cached && now - cached.ts < TABLE_CACHE_TTL_MS) {
+      return cached.data;
+    }
+  }
+
   if (!SUPABASE_URL || !SUPABASE_API_KEY) {
     tableDebug[table] = { ok: false, reason: "Missing SUPABASE_URL or Supabase API key" };
     return [];
@@ -589,8 +721,12 @@ async function supabaseFetch(table, limit = 20) {
     const text = await response.text();
     if (!response.ok) { tableDebug[table] = { ok: false, status: response.status, error: text }; return []; }
     const json = JSON.parse(text);
-    tableDebug[table] = { ok: true, status: response.status, rows_loaded: Array.isArray(json) ? json.length : 0 };
-    return Array.isArray(json) ? json : [];
+    const rows = Array.isArray(json) ? json : [];
+    tableDebug[table] = { ok: true, status: response.status, rows_loaded: rows.length };
+    if (STATIC_TABLE_CACHE.has(table)) {
+      tableCache.set(cacheKey, { ts: now, data: rows });
+    }
+    return rows;
   } catch (error) { tableDebug[table] = { ok: false, error: error.message }; return []; }
 }
 
@@ -605,6 +741,9 @@ async function supabaseInsert(table, payload) {
     }, 10000);
     const text = await response.text();
     if (!response.ok) { tableDebug[table] = { ok: false, status: response.status, insert_error: text }; return null; }
+    for (const key of tableCache.keys()) {
+      if (key.startsWith(`${table}:`)) tableCache.delete(key);
+    }
     return text ? JSON.parse(text) : null;
   } catch (error) { tableDebug[table] = { ok: false, insert_error: error.message }; return null; }
 }
@@ -884,9 +1023,58 @@ async function saveAuditLog(payload) {
   });
 }
 
+const TAPIWA_PERSONA_CONFIG = {
+  version: PERSONA_VERSION,
+  provider: TAPIWA_PROVIDER,
+  model: TAPIWA_MODEL,
+  banned_phrases: [
+    "As an AI",
+    "Request received",
+    "Processing your request",
+    "I have updated the system"
+  ],
+  fallback_style: "warm_local_human",
+  high_risk_mode: "calm_clear_professional"
+};
+
+function sanitizeTeamMessage(value = "") {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 900);
+}
+
+function validateAndNormalizeAiResult(aiResult, cleanMessage = "") {
+  const allowedCategories = ["incident", "pricing_issue", "driver_issue", "traffic", "system_issue", "general_update"];
+  const allowedRiskLevels = ["low", "medium", "high"];
+  const normalized = aiResult && typeof aiResult === "object" ? { ...aiResult } : {};
+
+  let category = String(normalized.category || "").trim();
+  if (!allowedCategories.includes(category)) {
+    const lower = cleanMessage.toLowerCase();
+    if (/price|fare|cost|charge|quote|how much|km|distance/.test(lower)) category = "pricing_issue";
+    else if (/robbed|accident|threat|violence|attack|stolen|drunk|refuse/.test(lower)) category = "incident";
+    else if (/driver/.test(lower)) category = "driver_issue";
+    else if (/traffic|rain|roadblock|police|jam/.test(lower)) category = "traffic";
+    else category = "general_update";
+  }
+
+  let riskLevel = String(normalized.risk_level || "").trim().toLowerCase();
+  if (!allowedRiskLevels.includes(riskLevel)) riskLevel = "low";
+
+  let teamMessage = sanitizeTeamMessage(normalized.team_message);
+  if (!teamMessage) teamMessage = pickHumanErrorMessage();
+
+  return {
+    category,
+    risk_level: riskLevel,
+    internal_summary: String(normalized.internal_summary || cleanMessage).slice(0, 300),
+    team_message: teamMessage,
+    requires_supervisor_approval: normalized.requires_supervisor_approval === true,
+    opening_used: String(normalized.opening_used || "").slice(0, 120)
+  };
+}
+
 // ── MAIN ENDPOINT ──────────────────────────────────────────────────────────────
 
-app.post("/ai/analyze", async (req, res) => {
+app.post("/ai/analyze", requireApiAuth, async (req, res) => {
   let cleanMessage = "";
   let context = null;
   let aiResult = {};
@@ -919,7 +1107,7 @@ app.post("/ai/analyze", async (req, res) => {
       rememberTapiwaResponse(memory, joke, joke.split(/[.!?]/)[0]);
       memory.lastUserMessage = cleanMessage;
       saveConversationMemory(sessionId, memory);
-      return res.json({
+      const fastPayload = {
         ignored: false,
         category: "general_update",
         risk_level: "low",
@@ -927,8 +1115,14 @@ app.post("/ai/analyze", async (req, res) => {
         team_message: joke,
         requires_supervisor_approval: false,
         used_data: {},
-        debug_memory: { sessionId, recentResponses: memory.recentResponses, recentJokes: memory.recentJokes }
-      });
+        persona_version: PERSONA_VERSION,
+        provider: TAPIWA_PROVIDER,
+        model: TAPIWA_MODEL
+      };
+      if (EXPOSE_DEBUG_PAYLOADS) {
+        fastPayload.debug_memory = { sessionId, recentResponses: memory.recentResponses, recentJokes: memory.recentJokes };
+      }
+      return res.json(fastPayload);
     }
 
     // ── Resolve context — always fetch so Groq has real data ──────────────────
@@ -1025,9 +1219,16 @@ app.post("/ai/analyze", async (req, res) => {
     const highRiskMode = isHighRiskIntent(detectedIntent, cleanMessage);
     const selectedVibe = pickTapiwaVibe(detectedIntent, cleanMessage);
     const currentDateTime = getBlantyreDateTime();
+    const activePersonaConfig = ENABLE_SHARED_PERSONA_CONFIG ? TAPIWA_PERSONA_CONFIG : null;
+    const bannedPhrases = activePersonaConfig?.banned_phrases?.length
+      ? activePersonaConfig.banned_phrases.map((phrase) => `  - "${phrase}"`).join("\n")
+      : '  - "As an AI"\n  - "Request received"';
 
     const systemPrompt = `
 You are Tapiwa, a real Malawian dispatcher and the human voice of Zachangu Commuters.
+Persona version: ${activePersonaConfig?.version || PERSONA_VERSION}
+Provider: ${activePersonaConfig?.provider || TAPIWA_PROVIDER}
+Model: ${activePersonaConfig?.model || TAPIWA_MODEL}
 
 You are NOT a cold chatbot.
 You are NOT a script-filler.
@@ -1075,10 +1276,7 @@ HOW YOU SHOULD TALK:
 - Do not repeat the same greeting or sentence structure often.
 - Avoid robotic phrases completely.
 - Never say:
-  - "As an AI"
-  - "Request received"
-  - "Processing your request"
-  - "I have updated the system"
+${bannedPhrases}
   - "Based on the provided data" unless absolutely necessary.
 - Speak like a human teammate.
 - Adapt to the sender: if they are playful, be playful; if they are direct, be direct; if they often use Chichewa, use light Chichewa back.
@@ -1152,6 +1350,7 @@ No extra text outside JSON.
       senderName,
       senderRole,
       session_id: sessionId,
+      persona_config: activePersonaConfig,
       current_datetime: currentDateTime,
       detected_intent: detectedIntent,
       operational_mode: operationalMode,
@@ -1225,30 +1424,30 @@ No extra text outside JSON.
         internal_summary: "Tapiwa Gemini error",
         team_message: humanError,
         requires_supervisor_approval: false,
-        used_data: {}
+        used_data: {},
+        persona_version: PERSONA_VERSION,
+        provider: TAPIWA_PROVIDER,
+        model: TAPIWA_MODEL
       });
     }
 
-    // ── Sanitise Groq output ──────────────────────────────────────────────────
-    const allowedCategories = ["incident","pricing_issue","driver_issue","traffic","system_issue","general_update"];
-    const allowedRiskLevels = ["low","medium","high"];
+    // ── Sanitise model output ─────────────────────────────────────────────────
+    const normalizedAi = ENABLE_STRICT_OUTPUT_VALIDATION
+      ? validateAndNormalizeAiResult(aiResult, cleanMessage)
+      : {
+          category: aiResult.category || "general_update",
+          risk_level: aiResult.risk_level || "low",
+          internal_summary: aiResult.internal_summary || cleanMessage,
+          team_message: sanitizeTeamMessage(aiResult.team_message) || pickHumanErrorMessage(),
+          requires_supervisor_approval: aiResult.requires_supervisor_approval === true,
+          opening_used: String(aiResult.opening_used || "")
+        };
 
-    let category = aiResult.category || "general_update";
-    if (!allowedCategories.includes(category)) {
-      const lower = cleanMessage.toLowerCase();
-      if (/price|fare|cost|charge|quote|how much|km|distance/.test(lower)) category = "pricing_issue";
-      else if (/robbed|accident|threat|violence|attack|stolen|drunk|refuse/.test(lower)) category = "incident";
-      else if (/driver/.test(lower)) category = "driver_issue";
-      else if (/traffic|rain|roadblock|police|jam/.test(lower)) category = "traffic";
-      else category = "general_update";
-    }
+    const category = normalizedAi.category;
+    const riskLevel = normalizedAi.risk_level;
+    const teamMessage = normalizedAi.team_message;
 
-    let riskLevel = aiResult.risk_level || "low";
-    if (!allowedRiskLevels.includes(riskLevel)) riskLevel = "low";
-
-    const teamMessage = aiResult.team_message || pickHumanErrorMessage();
-
-    rememberTapiwaResponse(memory, teamMessage, aiResult.opening_used || "");
+    rememberTapiwaResponse(memory, teamMessage, normalizedAi.opening_used || "");
     memory.lastUserMessage = cleanMessage;
     saveConversationMemory(sessionId, memory);
 
@@ -1256,20 +1455,26 @@ No extra text outside JSON.
       ignored: false,
       category,
       risk_level: riskLevel,
-      internal_summary: aiResult.internal_summary || cleanMessage,
+      internal_summary: normalizedAi.internal_summary,
       team_message: teamMessage,
-      requires_supervisor_approval: riskLevel === "high" || aiResult.requires_supervisor_approval === true,
+      requires_supervisor_approval: riskLevel === "high" || normalizedAi.requires_supervisor_approval === true,
       used_data: {
         computed_fare: computedFare,
         route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name },
         maurice: mauriceData
       },
-      debug_memory: { sessionId, lastRoute:memory.lastRoute, pendingConfirmation:memory.pendingConfirmation, confirmedRoute:memory.confirmedRoute, recentResponses: memory.recentResponses, userProfile: memory.userProfile },
-      debug_data_counts: context.data_counts,
-      debug_matched_counts: context.matched_counts,
+      persona_version: PERSONA_VERSION,
+      provider: TAPIWA_PROVIDER,
+      model: TAPIWA_MODEL,
       routed_to_maurice: useMaurice,
       maurice: mauriceData
     };
+
+    if (EXPOSE_DEBUG_PAYLOADS) {
+      responsePayload.debug_memory = { sessionId, lastRoute:memory.lastRoute, pendingConfirmation:memory.pendingConfirmation, confirmedRoute:memory.confirmedRoute, recentResponses: memory.recentResponses, userProfile: memory.userProfile };
+      responsePayload.debug_data_counts = context.data_counts;
+      responsePayload.debug_matched_counts = context.matched_counts;
+    }
 
     await saveAuditLog({
       request_type: "team_chat",
@@ -1278,7 +1483,7 @@ No extra text outside JSON.
       ai_category: category,
       risk_level: riskLevel,
       team_message: teamMessage,
-      internal_summary: aiResult.internal_summary || cleanMessage,
+      internal_summary: normalizedAi.internal_summary,
       used_data: responsePayload.used_data,
       raw_ai_response: aiResult,
       success: true
@@ -1303,7 +1508,10 @@ No extra text outside JSON.
       internal_summary: "Server error",
       team_message: pickHumanErrorMessage(),
       requires_supervisor_approval: false,
-      used_data: {}
+      used_data: {},
+      persona_version: PERSONA_VERSION,
+      provider: TAPIWA_PROVIDER,
+      model: TAPIWA_MODEL
     });
   }
 });
