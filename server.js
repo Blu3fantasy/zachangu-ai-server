@@ -164,9 +164,16 @@ function loadConversationMemoryFromDisk() {
       if (!sessionId || !memory || typeof memory !== "object") continue;
       conversationMemory.set(sessionId, {
         lastRoute: memory.lastRoute || null,
-        pendingConfirmation: Boolean(memory.pendingConfirmation),
+        pendingConfirmation: memory.pendingConfirmation || null,
         confirmedRoute: memory.confirmedRoute || null,
         lastAssistTopic: memory.lastAssistTopic || null,
+        recentResponses: Array.isArray(memory.recentResponses) ? memory.recentResponses.slice(-8) : [],
+        recentOpeners: Array.isArray(memory.recentOpeners) ? memory.recentOpeners.slice(-8) : [],
+        recentJokes: Array.isArray(memory.recentJokes) ? memory.recentJokes.slice(-8) : [],
+        userProfile: memory.userProfile && typeof memory.userProfile === "object" ? memory.userProfile : {},
+        lastUserMessage: memory.lastUserMessage || null,
+        lastResponse: memory.lastResponse || null,
+        lastResponseAt: Number(memory.lastResponseAt || 0),
         updatedAt: Number(memory.updatedAt || Date.now())
       });
     }
@@ -181,9 +188,16 @@ function getConversationMemory(sessionId) {
   if (!conversationMemory.has(sessionId)) {
     conversationMemory.set(sessionId, {
       lastRoute: null,
-      pendingConfirmation: false,
+      pendingConfirmation: null,
       confirmedRoute: null,
       lastAssistTopic: null,
+      recentResponses: [],
+      recentOpeners: [],
+      recentJokes: [],
+      userProfile: {},
+      lastUserMessage: null,
+      lastResponse: null,
+      lastResponseAt: 0,
       updatedAt: Date.now()
     });
   }
@@ -193,9 +207,16 @@ function getConversationMemory(sessionId) {
 function saveConversationMemory(sessionId, memory) {
   conversationMemory.set(sessionId, {
     lastRoute: memory.lastRoute || null,
-    pendingConfirmation: Boolean(memory.pendingConfirmation),
+    pendingConfirmation: memory.pendingConfirmation || null,
     confirmedRoute: memory.confirmedRoute || null,
     lastAssistTopic: memory.lastAssistTopic || null,
+    recentResponses: Array.isArray(memory.recentResponses) ? memory.recentResponses.slice(-8) : [],
+    recentOpeners: Array.isArray(memory.recentOpeners) ? memory.recentOpeners.slice(-8) : [],
+    recentJokes: Array.isArray(memory.recentJokes) ? memory.recentJokes.slice(-8) : [],
+    userProfile: memory.userProfile && typeof memory.userProfile === "object" ? memory.userProfile : {},
+    lastUserMessage: memory.lastUserMessage || null,
+    lastResponse: memory.lastResponse || null,
+    lastResponseAt: Number(memory.lastResponseAt || 0),
     updatedAt: Date.now()
   });
   saveConversationMemoryToDisk();
@@ -283,6 +304,85 @@ function pickHumanErrorMessage() {
     "Bit of a slow moment here, koma I’m still with you."
   ];
   return phrases[Math.floor(Math.random() * phrases.length)];
+}
+
+
+function isAffirmationMessage(message = "") {
+  return /^(yes|yeah|yep|correct|confirm|confirmed|right|eya|inde|ee|ok|okay)\b/i.test(String(message || "").trim());
+}
+
+function isJokeRequest(message = "") {
+  return /\b(joke|make me laugh|funny|cheer us|tell us something funny)\b/i.test(String(message || ""));
+}
+
+function updateUserToneProfile(memory, message = "") {
+  const text = String(message || "");
+  const profile = memory.userProfile && typeof memory.userProfile === "object" ? memory.userProfile : {};
+  profile.message_count = Number(profile.message_count || 0) + 1;
+  profile.prefers_humour = profile.prefers_humour || /haha|lol|😂|😅|joke|funny|shaaa|shaah|bo/i.test(text);
+  profile.brief_style = text.length < 35;
+  profile.uses_chichewa = profile.uses_chichewa || /\b(bo|muli|bwanji|eya|inde|zikomo|koma|pang'ono|pompano|zili|tikuyenda)\b/i.test(text);
+  profile.last_seen_at = new Date().toISOString();
+  memory.userProfile = profile;
+  return profile;
+}
+
+function rememberTapiwaResponse(memory, response = "", opening = "") {
+  const clean = String(response || "").trim();
+  if (!Array.isArray(memory.recentResponses)) memory.recentResponses = [];
+  if (!Array.isArray(memory.recentOpeners)) memory.recentOpeners = [];
+  if (clean) {
+    memory.recentResponses.push(clean);
+    memory.lastResponse = clean;
+    memory.lastResponseAt = Date.now();
+  }
+  if (opening) memory.recentOpeners.push(String(opening).trim());
+  memory.recentResponses = memory.recentResponses.slice(-8);
+  memory.recentOpeners = memory.recentOpeners.slice(-8);
+}
+
+function responseLooksRepeated(memory, response = "") {
+  const clean = normalizeText(response);
+  if (!clean) return false;
+  const recent = Array.isArray(memory.recentResponses) ? memory.recentResponses : [];
+  return recent.some(prev => {
+    const p = normalizeText(prev);
+    if (!p) return false;
+    if (p === clean) return true;
+    if (clean.includes(p) || p.includes(clean)) return Math.min(clean.length, p.length) > 25;
+    return similarity(clean, p) > 0.92;
+  });
+}
+
+function pickLocalJoke(memory) {
+  const jokes = [
+    "A dispatcher told the map, ‘be honest, are we routing or guessing today?’ The map just zoomed out and kept quiet 😄",
+    "One customer said ‘I’m just nearby’… shaaah, in Malawi that can mean 200 metres or a whole zone away 😅",
+    "Fuel prices looked at our fare calculator and said, ‘make space, I’m joining the meeting.’",
+    "A driver once said ‘I’m two minutes away.’ Even the clock laughed pang’ono 😄",
+    "Dispatch life: customer says ‘pa corner’ like Lilongwe has only one corner. Shaaaah 😅",
+    "The route was so confusing even ORS wanted a cup of tea before answering.",
+    "A map without landmarks in Malawi is just vibes and prayers, koma tikuyenda 😄",
+    "Customer: ‘I’m at the shop.’ Dispatcher: ‘Which shop?’ Customer: ‘The one everyone knows.’ Malawi classic 😅"
+  ];
+  if (!Array.isArray(memory.recentJokes)) memory.recentJokes = [];
+  const available = jokes.filter(j => !memory.recentJokes.includes(j));
+  const chosen = (available.length ? available : jokes)[Math.floor(Math.random() * (available.length ? available.length : jokes.length))];
+  memory.recentJokes.push(chosen);
+  memory.recentJokes = memory.recentJokes.slice(-6);
+  return chosen;
+}
+
+function buildDuplicateSafeFallback({ cleanMessage, detectedIntent, routeUnderstanding, computedFare, memory }) {
+  if (isJokeRequest(cleanMessage)) return pickLocalJoke(memory);
+  if (detectedIntent === "price_request") {
+    const pickup = routeUnderstanding?.pickup?.Landmark_Name || routeUnderstanding?.pickupRaw || "the pickup";
+    const dropoff = routeUnderstanding?.dropoff?.Landmark_Name || routeUnderstanding?.dropoffRaw || "the drop-off";
+    if (computedFare?.recommended_mwk) return `For ${pickup} → ${dropoff}, I’d guide around MWK ${Number(computedFare.recommended_mwk).toLocaleString("en-US")}. Not bad, tikuyenda 😄`;
+    if (routeUnderstanding?.confidence === "medium") return `Just to avoid pricing ghosts 😅 are we confirming ${pickup} → ${dropoff}?`;
+    return "I don’t have enough system data to price that trip yet — send me the pickup and drop-off clearly and we’ll sort it.";
+  }
+  return "Let me say it differently 😄 I’m with you, but the system needs a cleaner signal on that one.";
 }
 
 function extractJsonObject(text = "") {
@@ -811,6 +911,25 @@ app.post("/ai/analyze", async (req, res) => {
     cleanMessage = cleanTapiwaMessage(message);
     const sessionId = buildSessionId({ sessionId: rawSessionId, senderName, senderRole });
     const memory = getConversationMemory(sessionId);
+    const userProfile = updateUserToneProfile(memory, cleanMessage);
+
+    // Fast path for jokes: keep them varied and avoid paying the model to repeat itself.
+    if (isJokeRequest(cleanMessage) && !isPricingLikeMessage(cleanMessage)) {
+      const joke = pickLocalJoke(memory);
+      rememberTapiwaResponse(memory, joke, joke.split(/[.!?]/)[0]);
+      memory.lastUserMessage = cleanMessage;
+      saveConversationMemory(sessionId, memory);
+      return res.json({
+        ignored: false,
+        category: "general_update",
+        risk_level: "low",
+        internal_summary: "Local joke response",
+        team_message: joke,
+        requires_supervisor_approval: false,
+        used_data: {},
+        debug_memory: { sessionId, recentResponses: memory.recentResponses, recentJokes: memory.recentJokes }
+      });
+    }
 
     // ── Resolve context — always fetch so Groq has real data ──────────────────
     // If this is a follow-up about a confirmed route, look up that route
@@ -824,8 +943,21 @@ app.post("/ai/analyze", async (req, res) => {
     }
 
     context = await fetchZachanguContext(lookupMessage);
-    const routeUnderstanding = context.route_understanding;
-    const useMaurice = shouldUseMaurice(cleanMessage);
+    let routeUnderstanding = context.route_understanding;
+    if (isAffirmationMessage(cleanMessage) && memory.pendingConfirmation && !hasExplicitRoute) {
+      routeUnderstanding = {
+        hasRoute: true,
+        confidence: "high",
+        pickupRaw: memory.pendingConfirmation.pickupRaw || memory.pendingConfirmation.pickup,
+        dropoffRaw: memory.pendingConfirmation.dropoffRaw || memory.pendingConfirmation.dropoff,
+        pickup: { Landmark_Name: memory.pendingConfirmation.pickup || memory.pendingConfirmation.pickupRaw },
+        dropoff: { Landmark_Name: memory.pendingConfirmation.dropoff || memory.pendingConfirmation.dropoffRaw },
+        note: "Route confirmed by dispatcher reply."
+      };
+      context.route_understanding = routeUnderstanding;
+    }
+
+    const useMaurice = shouldUseMaurice(cleanMessage) || Boolean(memory.pendingConfirmation && isAffirmationMessage(cleanMessage));
 
     if (useMaurice) {
       try {
@@ -870,16 +1002,16 @@ app.post("/ai/analyze", async (req, res) => {
       memory.lastRoute = { ...detectedRoute };
       if (isCorrection) {
         memory.confirmedRoute = detectedRoute.confidence==="high" ? { ...detectedRoute } : null;
-        memory.pendingConfirmation = detectedRoute.confidence==="medium";
+        memory.pendingConfirmation = detectedRoute.confidence==="medium" ? { ...detectedRoute } : null;
       } else if (detectedRoute.confidence==="high") {
         memory.confirmedRoute = { ...detectedRoute };
-        memory.pendingConfirmation = false;
+        memory.pendingConfirmation = null;
       } else if (detectedRoute.confidence==="medium") {
         memory.confirmedRoute = null;
-        memory.pendingConfirmation = true;
+        memory.pendingConfirmation = { ...detectedRoute };
       } else {
         memory.confirmedRoute = null;
-        memory.pendingConfirmation = false;
+        memory.pendingConfirmation = null;
       }
     }
     saveConversationMemory(sessionId, memory);
@@ -949,6 +1081,14 @@ HOW YOU SHOULD TALK:
   - "I have updated the system"
   - "Based on the provided data" unless absolutely necessary.
 - Speak like a human teammate.
+- Adapt to the sender: if they are playful, be playful; if they are direct, be direct; if they often use Chichewa, use light Chichewa back.
+- Do not repeat or closely resemble any message in recentResponses or recentOpeners. If you already said something, find a fresh angle.
+
+USER ADAPTATION:
+- Use the sender's name only sometimes, not every reply.
+- If the sender has shown they enjoy humour, keep the humour more visible in normal work.
+- If the sender is brief, do not over-explain.
+- If the sender is Razzaq or an operations teammate, sound like a colleague in the ops room, not customer support.
 
 HUMOUR RULE:
 - Humour is allowed and encouraged in normal dispatch work.
@@ -1021,8 +1161,12 @@ No extra text outside JSON.
       memory: {
         lastRoute: memory.lastRoute,
         pendingConfirmation: memory.pendingConfirmation,
-        confirmedRoute: memory.confirmedRoute
+        confirmedRoute: memory.confirmedRoute,
+        recentResponses: memory.recentResponses || [],
+        recentOpeners: memory.recentOpeners || [],
+        recentJokes: memory.recentJokes || []
       },
+      adaptive_user_profile: userProfile,
       route_understanding: {
         hasRoute: routeUnderstanding.hasRoute,
         confidence: routeUnderstanding.confidence,
@@ -1051,6 +1195,17 @@ No extra text outside JSON.
       });
 
       aiResult = JSON.parse(extractJsonObject(aiRawText));
+
+      if (responseLooksRepeated(memory, aiResult.team_message)) {
+        aiResult.team_message = buildDuplicateSafeFallback({
+          cleanMessage,
+          detectedIntent,
+          routeUnderstanding,
+          computedFare,
+          memory
+        });
+        aiResult.internal_summary = `${aiResult.internal_summary || cleanMessage} (duplicate-safe rewrite applied)`;
+      }
     } catch (geminiError) {
       console.error("TAPIWA GEMINI ERROR:", geminiError.message);
       const humanError = pickHumanErrorMessage();
@@ -1091,7 +1246,11 @@ No extra text outside JSON.
     let riskLevel = aiResult.risk_level || "low";
     if (!allowedRiskLevels.includes(riskLevel)) riskLevel = "low";
 
-    const teamMessage = aiResult.team_message || "Checking on that — give me a sec.";
+    const teamMessage = aiResult.team_message || pickHumanErrorMessage();
+
+    rememberTapiwaResponse(memory, teamMessage, aiResult.opening_used || "");
+    memory.lastUserMessage = cleanMessage;
+    saveConversationMemory(sessionId, memory);
 
     const responsePayload = {
       ignored: false,
@@ -1105,7 +1264,7 @@ No extra text outside JSON.
         route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name },
         maurice: mauriceData
       },
-      debug_memory: { sessionId, lastRoute:memory.lastRoute, pendingConfirmation:memory.pendingConfirmation, confirmedRoute:memory.confirmedRoute },
+      debug_memory: { sessionId, lastRoute:memory.lastRoute, pendingConfirmation:memory.pendingConfirmation, confirmedRoute:memory.confirmedRoute, recentResponses: memory.recentResponses, userProfile: memory.userProfile },
       debug_data_counts: context.data_counts,
       debug_matched_counts: context.matched_counts,
       routed_to_maurice: useMaurice,
@@ -1142,7 +1301,7 @@ No extra text outside JSON.
       category: "system_issue",
       risk_level: "low",
       internal_summary: "Server error",
-      team_message: "Something went off on my end — try that again.",
+      team_message: pickHumanErrorMessage(),
       requires_supervisor_approval: false,
       used_data: {}
     });
