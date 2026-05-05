@@ -1111,47 +1111,41 @@ function buildMauriceLocationQuestion({ detectedArea, candidates, message = "" }
       : "Which area is that place in — Area 25, Area 49, Area 36, Kanengo, City Centre, or somewhere else?");
     questions.push("What known place is nearby — a market, school, filling station, church, hospital, police station, or main road?");
     questions.push("When coming from town, is it before or after that nearby place?");
-    return questions.join("
-");
+    return questions.join("\\n");
   }
 
   if (names.length >= 3) {
     questions.push(`In ${detectedArea}, is it closer to ${names.slice(0, 3).join(", ")}, or another known place?`);
     questions.push("What type of place is the rider near — shop, market, school, filling station, church, hospital, or main road?");
     questions.push("When coming from town, is it before, after, behind, or opposite that landmark?");
-    return questions.join("
-");
+    return questions.join("\n");
   }
 
   if (names.length === 2) {
     questions.push(`In ${detectedArea}, is it closer to ${names[0]} or ${names[1]}?`);
     questions.push("What exactly is nearby — shop, market, school, filling station, church, hospital, or main road?");
     questions.push("Is the place before, after, behind, or opposite that landmark?");
-    return questions.join("
-");
+    return questions.join("\n");
   }
 
   if (names.length === 1) {
     questions.push(`In ${detectedArea}, is it closer to ${names[0]}, or another known place?`);
     questions.push("What type of place is the rider near — shop, market, school, filling station, church, hospital, or main road?");
     questions.push("Is it before, after, behind, or opposite that place?");
-    return questions.join("
-");
+    return questions.join("\n");
   }
 
   if (clueType) {
     questions.push(`In ${detectedArea}, what known place is that ${clueType} close to?`);
     questions.push("Is it near a market, school, filling station, church, hospital, police station, or main road?");
     questions.push("When coming from town, is it before, after, behind, or opposite that known place?");
-    return questions.join("
-");
+    return questions.join("\n");
   }
 
   questions.push(`In ${detectedArea}, what known place is it close to?`);
   questions.push("Is that nearby place a market, school, filling station, church, hospital, police station, or main road?");
   questions.push("When coming from town, is it before, after, behind, or opposite that place?");
-  return questions.join("
-");
+  return questions.join("\n");
 }
 
 function isUnknownLocationDiscoveryNeeded(message = "", routeUnderstanding = {}) {
