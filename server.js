@@ -1113,7 +1113,7 @@ function buildMauriceLocationQuestion({ detectedArea, candidates, message = "" }
     );
     questions.push("What known place is it close to — a market, school, filling station, church, hospital, police station, or main road?");
     questions.push("When coming from town, is it before or after that known place?");
-    return questions.join("\\n");
+    return questions.join("\n");
   }
 
   if (names.length >= 2) {
@@ -1624,7 +1624,7 @@ OUTPUT FORMAT:
 Return valid JSON only.
 No markdown.
 No extra text outside JSON.
-Do not wrap JSON in markdown or ```json code fences.
+Do not wrap JSON in markdown code fences.
 
 {
   "category": "pricing_issue|driver_issue|incident|traffic|system_issue|general_update",
