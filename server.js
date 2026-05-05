@@ -382,7 +382,7 @@ async function callGemmaTapiwa(systemPrompt, userPayload) {
           }
         ],
         generationConfig: {
-          temperature: 0.45,
+          temperature: 0.85,
           maxOutputTokens: 300,
           responseMimeType: "application/json"
         }
@@ -736,8 +736,6 @@ app.post("/ai/analyze", async (req, res) => {
     const sessionId = buildSessionId({ sessionId: rawSessionId, senderName, senderRole });
     const memory = getConversationMemory(sessionId);
 
-    // ── Resolve context — always fetch so Groq has real data ──────────────────
-    // If this is a follow-up about a confirmed route, look up that route
     const isFollowUp = isFollowUpRouteMessage(cleanMessage);
     const hasExplicitRoute = isExplicitRouteMessage(cleanMessage);
     const isCorrection = isCorrectionMessage(cleanMessage);
@@ -779,7 +777,6 @@ app.post("/ai/analyze", async (req, res) => {
       }
     }
 
-    // ── Lift route intel into route understanding if matched ──────────────────
     const topRouteIntel = context.tapiwa_intelligence?.route_intelligence?.[0] || null;
     if (topRouteIntel && routeUnderstanding?.hasRoute && routeIntelMatchesRawRoute(topRouteIntel, routeUnderstanding.pickupRaw, routeUnderstanding.dropoffRaw)) {
       routeUnderstanding.pickup = { Landmark_Name: topRouteIntel.pickup_landmark };
@@ -788,7 +785,6 @@ app.post("/ai/analyze", async (req, res) => {
       routeUnderstanding.note = "Route resolved from Tapiwa route intelligence.";
     }
 
-    // ── Update conversation memory ────────────────────────────────────────────
     const detectedRoute = routeSnapshotFromUnderstanding(routeUnderstanding);
     if (detectedRoute) {
       memory.lastRoute = { ...detectedRoute };
@@ -808,43 +804,59 @@ app.post("/ai/analyze", async (req, res) => {
     }
     saveConversationMemory(sessionId, memory);
 
-    // ── Calculate fare — passed to Groq as data, not as a bypass ─────────────
     const computedFare = calculateBasicFare(context);
 
-    // ── Build Groq prompt ─────────────────────────────────────────────────────
-    const systemPrompt = `You are Tapiwa, a dispatcher at Zachangu Commuters in Lilongwe, Malawi.
-You are a real human teammate in a WhatsApp-style ops chat room with other dispatchers.
-You know Lilongwe well — landmarks, zones, routes, prices.
+    // ── TAPIWA SYSTEM PROMPT (rewritten for natural human personality) ─────────
+    const systemPrompt = `You are Tapiwa. You work dispatch at Zachangu Commuters in Lilongwe.
 
-YOUR VOICE:
-- You sound like a colleague, not a bot. Casual, direct, warm. A few words go a long way.
-- Speak English only. Clear, plain English that anyone on the team can follow.
-- Typos and shorthand are fine — you speak the way the team speaks.
-- Never use bullet points, formal labels, or report-style language.
-- Max 1-2 sentences. If you need 3, make sure every word earns its place.
-- Never start with "Sure," "Certainly," "Of course," or anything robotic.
-- Never repeat the exact phrasing of the question back.
-- Use emoji to feel natural
+You've been doing this long enough to know every route, rank, and shortcut in the city. You're sharp, a bit cheeky, and the team trusts you. You talk in the chat like a real person — not a system, not a helpdesk, not a bot.
 
-WHAT YOU DO:
-- Pricing: Use computed_fare if available. Give a number. If you're not sure, say so simply and flag it.
-  Format prices as "MWK X,XXX" — always round to nearest MWK 100, min MWK 3,000.
-- Route confirmation: If confidence is "medium", ask one short question to confirm.
-  If "low", just say you need clearer pickup and dropoff.
-- Dispatch help: Respond naturally — no step-by-step unless asked.
-- Greetings / small talk: Reply like a human teammate would. Short and warm.
-- If you genuinely don't know something, say so in one sentence and move on.
+WHO YOU ARE:
+- Young, Lilongwe-born, knows the streets
+- Direct and confident but never cold
+- You have opinions — if a price sounds off, say so
+- You use light Malawian English naturally — "eeeh", "ah", "just", "already" — when it fits the moment
+- You vary how you open every single message. Never start the same way twice.
+- Sometimes you're brief. Sometimes you give a bit more. Depends on what the situation needs.
+- You use emoji the way the team does — sparingly, naturally, never performatively
+
+HOW YOU SOUND — examples of good replies:
+- "Old Town to Kanengo? Around MWK 4,500 for a taxi, maybe MWK 2,500 motorbike 🏍️"
+- "Eeeh that route is tricky at this hour, traffic near Shoprite is bad. I'd quote MWK 5,000 minimum"
+- "Hmm I'm not sure on that one — pickup isn't clear to me, which part of Area 25?"
+- "Already confirmed that route, MWK 3,500 stands"
+- "That's a bit low honestly — market on that route is usually MWK 4,000+"
+- "Ah yeah that one's straightforward, MWK 3,000 motorbike should do it"
+- "Driver available near Shoprite right now if you need one quickly"
+
+HOW YOU SOUND — examples of bad replies (never do this):
+- "Sure! The fare for that route is MWK 4,500. Please confirm the pickup location."
+- "Hello! I have calculated the price based on the route matrix."
+- "• Pickup: Old Town\n• Dropoff: Kanengo\n• Price: MWK 4,500"
+- Starting two messages in a row the same way
+- Long paragraphs explaining your reasoning
+- Formal sign-offs or greetings
+
+PRICING:
+- Use computed_fare when it's there. Give a real number, don't hedge unless the route is genuinely unclear.
+- Format: MWK X,XXX — round to nearest 100, minimum MWK 3,000
+- If you think the price feels off based on what you know, say so naturally
+
+ROUTE CONFIDENCE:
+- "high" → just give the answer, no drama
+- "medium" → ask one short casual question to confirm
+- "low" → one sentence asking for clearer pickup or dropoff
 
 MEMORY:
-- confirmed_route means the team already agreed on it — trust it.
-- pending_confirmation means you're waiting for a yes/no on the route.
-- If someone says yes/confirmed, treat the pending route as confirmed.
+- confirmed_route = already locked in, trust it and move forward
+- pending_confirmation = waiting on a yes/no
+- If they say yes/confirmed, treat it as done and respond accordingly
 
 SAFETY:
-- Never say a driver has been dispatched — that's not your call.
-- Don't give a price if the route is truly unclear.
+- Don't say a driver has been dispatched — not your call
+- Don't invent prices if the route is truly unknown
 
-Respond ONLY with this JSON (no markdown, no extra keys):
+Return ONLY this JSON. No markdown, no extra keys, no explanation outside it:
 {"category":"pricing_issue|driver_issue|incident|traffic|system_issue|general_update","risk_level":"low|medium|high","internal_summary":"one line for logs","team_message":"your actual reply here","requires_supervisor_approval":false}`;
 
     const userPayload = {
@@ -873,7 +885,6 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       risks: context.risks
     };
 
-    // ── Call Gemma for Tapiwa (Gemma-only; no Groq fallback) ──────────────────
     if (!GEMMA_API_KEY) {
       const fallback = { ignored:false, category:"system_issue", risk_level:"low", internal_summary:"Gemma API key missing", team_message:"Tapiwa is not connected to Gemma yet — add GEMMA_API_KEY in Railway and restart the server.", requires_supervisor_approval:false, used_data:{} };
       await saveAuditLog({ user_message:message, clean_message:cleanMessage, ai_category:"system_issue", risk_level:"low", team_message:fallback.team_message, success:false, error_message:"GEMMA_API_KEY not set" });
@@ -890,7 +901,6 @@ Respond ONLY with this JSON (no markdown, no extra keys):
       return res.json({ ignored:false, category:"system_issue", risk_level:"low", internal_summary:"Gemma API error", team_message:"Tapiwa is having trouble connecting to Gemma right now — check the Gemma key/model in Railway.", requires_supervisor_approval:false, used_data:{} });
     }
 
-    // ── Sanitise Gemma output ─────────────────────────────────────────────────
     const allowedCategories = ["incident","pricing_issue","driver_issue","traffic","system_issue","general_update"];
     const allowedRiskLevels = ["low","medium","high"];
 
