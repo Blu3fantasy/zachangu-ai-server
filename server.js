@@ -974,6 +974,195 @@ async function fetchZachanguContext(userMessage) {
   };
 }
 
+
+
+// ── MAURICE LOCATION DISCOVERY (Supabase-backed, no hardcoded landmarks) ──────
+
+function detectLocationAreaHint(text = "") {
+  const clean = normalizeText(text);
+  const match = clean.match(/(?:area|ma)\s?\d+/i);
+  if (!match) return null;
+  return match[0].replace(/^ma/i, "Area").replace(/^area/i, "Area").replace(/\s+/, " ").trim();
+}
+
+function extractLandmarkAliases(landmark = {}) {
+  const aliases = [];
+
+  const directAliases = landmark.aliases || landmark.Aliases || landmark.alias || landmark.Alias;
+  if (Array.isArray(directAliases)) aliases.push(...directAliases);
+  else if (typeof directAliases === "string") {
+    const parsed = safeJsonParse(directAliases);
+    if (Array.isArray(parsed)) aliases.push(...parsed);
+    else aliases.push(...directAliases.split(/[;,|]/).map((x) => x.trim()).filter(Boolean));
+  }
+
+  const notes = landmark.Notes || landmark.notes;
+  const noteMeta = typeof notes === "string" ? safeJsonParse(notes) : notes;
+  if (noteMeta && typeof noteMeta === "object") {
+    if (Array.isArray(noteMeta.aliases)) aliases.push(...noteMeta.aliases);
+    if (typeof noteMeta.also_known_as === "string") aliases.push(noteMeta.also_known_as);
+    if (Array.isArray(noteMeta.also_known_as)) aliases.push(...noteMeta.also_known_as);
+  }
+
+  return [...new Set(aliases.map((x) => String(x || "").trim()).filter(Boolean))];
+}
+
+function landmarkDisplayName(landmark = {}) {
+  return landmark.Landmark_Name || landmark.name || landmark.landmark_name || landmark.Name || "Unknown landmark";
+}
+
+function landmarkAreaName(landmark = {}) {
+  return landmark.Area || landmark.area || landmark.Area_Name || landmark.area_name || null;
+}
+
+function landmarkZoneId(landmark = {}) {
+  return landmark.Zone_ID || landmark.zone_id || landmark.zone || landmark.Zone || null;
+}
+
+function locationWordBoost(message = "", landmark = {}) {
+  const text = normalizeText(message);
+  const name = normalizeText(landmarkDisplayName(landmark));
+  let boost = 0;
+  const pairs = [
+    ["market", ["market", "msika"]],
+    ["fuel", ["fuel", "filling", "puma", "total", "shell", "phoenix"]],
+    ["hospital", ["hospital", "clinic", "health"]],
+    ["school", ["school", "secondary", "primary"]],
+    ["church", ["church", "ccap", "parish"]],
+    ["roundabout", ["roundabout"]],
+    ["depot", ["depot", "rank"]]
+  ];
+
+  for (const [nameNeedle, words] of pairs) {
+    if (name.includes(nameNeedle) && words.some((word) => text.includes(word))) boost += 0.08;
+  }
+  return Math.min(boost, 0.24);
+}
+
+function scoreLocationLandmark(message = "", landmark = {}) {
+  const text = normalizeText(message);
+  const name = landmarkDisplayName(landmark);
+  const area = landmarkAreaName(landmark);
+  const zone = landmarkZoneId(landmark);
+  const aliases = extractLandmarkAliases(landmark);
+  let score = 0;
+
+  if (name) score = Math.max(score, scoreLandmarkField(text, name, "name"));
+  for (const alias of aliases) score = Math.max(score, scoreLandmarkField(text, alias, "alias"));
+  if (area) score = Math.max(score, scoreLandmarkField(text, area, "area") * 0.72);
+  if (zone && text.includes(normalizeText(zone))) score = Math.max(score, 0.42);
+
+  const nearby = landmark.Nearby_Landmarks || landmark.nearby_landmarks || landmark.nearby || "";
+  for (const near of String(nearby).split(/[;,|]/).map((x) => x.trim()).filter(Boolean)) {
+    score = Math.max(score, scoreLandmarkField(text, near, "nearby") * 0.9);
+  }
+
+  score += locationWordBoost(message, landmark);
+  return Math.max(0, Math.min(1, score));
+}
+
+function estimateUnknownLocationDistanceKm(confidence = 0) {
+  if (confidence >= 0.86) return [2, 3.5];
+  if (confidence >= 0.72) return [3, 5];
+  return [4, 7];
+}
+
+function roundFareTo500(value) {
+  return Math.ceil(Number(value || 0) / 500) * 500;
+}
+
+function estimateUnknownLocationBikeFare(distanceRangeKm = [4, 7]) {
+  const [minKm, maxKm] = distanceRangeKm;
+  const low = Math.max(3000, roundFareTo500(Number(minKm) * 1400));
+  const high = Math.max(low + 1000, roundFareTo500(Number(maxKm) * 1600));
+  return [low, high];
+}
+
+function buildMauriceLocationQuestion({ detectedArea, candidates }) {
+  if (!detectedArea) {
+    return "Which area is that place in? For example Area 25, Area 49, Area 36, Kanengo, City Centre, or another area?";
+  }
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return "What is it close to — a market, school, filling station, church, hospital, police station, or main road?";
+  }
+  const names = candidates.slice(0, 4).map((x) => x.name).filter(Boolean);
+  if (!names.length) return "What known place is it closest to?";
+  return `Is it closer to ${names.join(", ")}, or another known place?`;
+}
+
+function isUnknownLocationDiscoveryNeeded(message = "", routeUnderstanding = {}) {
+  const text = normalizeText(message);
+  if (!text) return false;
+  const locationWords = /where|place|landmark|near|close|pafupi|kufupi|shop|church|school|market|msika|fuel|hospital|clinic|area|ma\s?\d+|pickup|dropoff|from|to|route|distance|km|price|fare|cost/.test(text);
+  const routeNotClear = !routeUnderstanding?.hasRoute || ["low", "medium"].includes(routeUnderstanding?.confidence);
+  return locationWords && routeNotClear;
+}
+
+async function mauriceFindLocationFromSupabase(message = "") {
+  const detectedArea = detectLocationAreaHint(message);
+  const landmarksRaw = await supabaseFetch("landmarks", 500);
+  const areaText = normalizeText(detectedArea || "");
+
+  let pool = landmarksRaw;
+  if (detectedArea) {
+    const areaFiltered = landmarksRaw.filter((lm) => {
+      const haystack = normalizeText([
+        landmarkAreaName(lm),
+        lm.Areas_Covered,
+        lm.areas_covered,
+        lm.Nearby_Landmarks,
+        lm.nearby_landmarks,
+        landmarkDisplayName(lm)
+      ].filter(Boolean).join(" "));
+      return haystack.includes(areaText) || similarity(haystack, areaText) >= 0.75;
+    });
+    if (areaFiltered.length) pool = areaFiltered;
+  }
+
+  const candidates = pool
+    .map((lm) => ({
+      id: lm.Landmark_ID || lm.id || lm.landmark_id || null,
+      name: landmarkDisplayName(lm),
+      area: landmarkAreaName(lm),
+      zone: landmarkZoneId(lm),
+      nearby_landmarks: lm.Nearby_Landmarks || lm.nearby_landmarks || null,
+      latitude: lm.latitude || lm.Latitude || lm.lat || null,
+      longitude: lm.longitude || lm.Longitude || lm.lng || lm.lon || null,
+      aliases: extractLandmarkAliases(lm),
+      confidence: scoreLocationLandmark(message, lm)
+    }))
+    .filter((x) => x.name && x.confidence > 0.08)
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 5);
+
+  const best = candidates[0] || null;
+  if (!best || best.confidence < 0.65) {
+    return {
+      status: "needs_more_info",
+      detectedArea,
+      confidence: best?.confidence || 0,
+      candidates,
+      question: buildMauriceLocationQuestion({ detectedArea, candidates })
+    };
+  }
+
+  const estimatedDistanceKm = estimateUnknownLocationDistanceKm(best.confidence);
+  const estimatedFareMwk = estimateUnknownLocationBikeFare(estimatedDistanceKm);
+
+  return {
+    status: "ready_to_price",
+    closestLandmark: best.name,
+    area: best.area || detectedArea,
+    zone: best.zone,
+    confidence: best.confidence,
+    estimatedDistanceKm,
+    estimatedFareMwk,
+    candidates,
+    question: null,
+    driverNote: `Customer appears closest to ${best.name}. Driver should call rider when nearby to confirm exact pickup point.`
+  };
+}
+
 // ── FARE CALCULATION (data only — never used to bypass Groq) ──────────────────
 
 function calculateBasicFare(context) {
@@ -1072,6 +1261,33 @@ function validateAndNormalizeAiResult(aiResult, cleanMessage = "") {
   };
 }
 
+
+
+// Maurice direct test endpoint: use this from Postman before wiring the UI.
+app.post("/ai/maurice/location", requireApiAuth, async (req, res) => {
+  try {
+    const { message } = req.body || {};
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({ ok: false, error: "message is required" });
+    }
+    const result = await mauriceFindLocationFromSupabase(message);
+    return res.json({
+      ok: true,
+      agent: "maurice",
+      mode: "location_discovery",
+      ...result
+    });
+  } catch (error) {
+    console.error("MAURICE LOCATION ERROR:", error);
+    return res.status(500).json({
+      ok: false,
+      agent: "maurice",
+      mode: "location_discovery",
+      error: error.message
+    });
+  }
+});
+
 // ── MAIN ENDPOINT ──────────────────────────────────────────────────────────────
 
 app.post("/ai/analyze", requireApiAuth, async (req, res) => {
@@ -1079,6 +1295,7 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
   let context = null;
   let aiResult = {};
   let mauriceData = null;
+  let mauriceLocation = null;
 
   try {
     const {
@@ -1151,7 +1368,22 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
       context.route_understanding = routeUnderstanding;
     }
 
-    const useMaurice = shouldUseMaurice(cleanMessage) || Boolean(memory.pendingConfirmation && isAffirmationMessage(cleanMessage));
+    if (isUnknownLocationDiscoveryNeeded(cleanMessage, routeUnderstanding)) {
+      try {
+        mauriceLocation = await mauriceFindLocationFromSupabase(cleanMessage);
+      } catch (locationError) {
+        console.warn("Maurice location discovery failed:", locationError.message);
+        mauriceLocation = {
+          status: "needs_more_info",
+          confidence: 0,
+          candidates: [],
+          question: "What known place is it close to? A market, school, filling station, church, hospital, or main road?",
+          error: locationError.message
+        };
+      }
+    }
+
+    const useMaurice = shouldUseMaurice(cleanMessage) || Boolean(memory.pendingConfirmation && isAffirmationMessage(cleanMessage)) || Boolean(mauriceLocation);
 
     if (useMaurice) {
       try {
@@ -1163,6 +1395,7 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
             confirmedRoute: memory.confirmedRoute
           },
           route_understanding: routeUnderstanding,
+          location_discovery: mauriceLocation,
           landmarks: context.landmarks,
           zones: context.zones,
           market_prices: context.market_prices,
@@ -1323,6 +1556,9 @@ OPERATIONAL RULES:
 - If price data is missing, say naturally: "I don’t have enough system data to price that trip yet."
 - If route confidence is medium, ask one short natural confirmation question.
 - If route confidence is low, ask for clearer pickup and dropoff.
+- If maurice_location.status is "needs_more_info", ask exactly ONE short question from maurice_location.question. Do not add a second question.
+- If maurice_location.status is "ready_to_price", give the closest landmark, estimated km range, estimated MWK fare range, confidence level, and a short driver confirmation note.
+- Never say "route not found". Say you are narrowing the place down.
 - Use MWK format for money, for example: "MWK 11,000".
 
 RESPONSE LENGTH:
@@ -1379,6 +1615,7 @@ No extra text outside JSON.
       route_matrix: context.route_matrix,
       tapiwa_intelligence: context.tapiwa_intelligence,
       maurice: mauriceData,
+      maurice_location: mauriceLocation,
       zones: context.zones,
       risks: context.risks
     };
@@ -1461,13 +1698,15 @@ No extra text outside JSON.
       used_data: {
         computed_fare: computedFare,
         route_understanding: { confidence: routeUnderstanding.confidence, pickup: routeUnderstanding.pickup?.Landmark_Name, dropoff: routeUnderstanding.dropoff?.Landmark_Name },
-        maurice: mauriceData
+        maurice: mauriceData,
+        maurice_location: mauriceLocation
       },
       persona_version: PERSONA_VERSION,
       provider: TAPIWA_PROVIDER,
       model: TAPIWA_MODEL,
       routed_to_maurice: useMaurice,
-      maurice: mauriceData
+      maurice: mauriceData,
+      maurice_location: mauriceLocation
     };
 
     if (EXPOSE_DEBUG_PAYLOADS) {
