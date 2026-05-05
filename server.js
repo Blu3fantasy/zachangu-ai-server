@@ -1078,16 +1078,80 @@ function estimateUnknownLocationBikeFare(distanceRangeKm = [4, 7]) {
   return [low, high];
 }
 
-function buildMauriceLocationQuestion({ detectedArea, candidates }) {
+function inferLocationClueType(message = "") {
+  const text = normalizeText(message);
+  if (/market|msika/.test(text)) return "market";
+  if (/fuel|filling|puma|total|shell|phoenix/.test(text)) return "filling station";
+  if (/hospital|clinic|health/.test(text)) return "hospital or clinic";
+  if (/school|secondary|primary/.test(text)) return "school";
+  if (/church|ccap|parish|mosque/.test(text)) return "church or worship place";
+  if (/roundabout|round about/.test(text)) return "roundabout";
+  if (/depot|rank|stage/.test(text)) return "depot or rank";
+  if (/road|street|bypass|main road/.test(text)) return "main road";
+  if (/shop|store|grocery|hardware|bar|lounge/.test(text)) return "shop or business";
+  return null;
+}
+
+function compactCandidateNames(candidates = [], limit = 3) {
+  return (Array.isArray(candidates) ? candidates : [])
+    .map((x) => x?.name || x?.Landmark_Name || x?.landmark_name)
+    .filter(Boolean)
+    .filter((name, index, arr) => arr.indexOf(name) === index)
+    .slice(0, limit);
+}
+
+function buildMauriceLocationQuestion({ detectedArea, candidates, message = "" }) {
+  const clueType = inferLocationClueType(message);
+  const names = compactCandidateNames(candidates, 4);
+  const questions = [];
+
   if (!detectedArea) {
-    return "Which area is that place in? For example Area 25, Area 49, Area 36, Kanengo, City Centre, or another area?";
+    questions.push(clueType
+      ? `Which area is that ${clueType} in — Area 25, Area 49, Area 36, Kanengo, City Centre, or somewhere else?`
+      : "Which area is that place in — Area 25, Area 49, Area 36, Kanengo, City Centre, or somewhere else?");
+    questions.push("What known place is nearby — a market, school, filling station, church, hospital, police station, or main road?");
+    questions.push("When coming from town, is it before or after that nearby place?");
+    return questions.join("
+");
   }
-  if (!Array.isArray(candidates) || candidates.length === 0) {
-    return "What is it close to — a market, school, filling station, church, hospital, police station, or main road?";
+
+  if (names.length >= 3) {
+    questions.push(`In ${detectedArea}, is it closer to ${names.slice(0, 3).join(", ")}, or another known place?`);
+    questions.push("What type of place is the rider near — shop, market, school, filling station, church, hospital, or main road?");
+    questions.push("When coming from town, is it before, after, behind, or opposite that landmark?");
+    return questions.join("
+");
   }
-  const names = candidates.slice(0, 4).map((x) => x.name).filter(Boolean);
-  if (!names.length) return "What known place is it closest to?";
-  return `Is it closer to ${names.join(", ")}, or another known place?`;
+
+  if (names.length === 2) {
+    questions.push(`In ${detectedArea}, is it closer to ${names[0]} or ${names[1]}?`);
+    questions.push("What exactly is nearby — shop, market, school, filling station, church, hospital, or main road?");
+    questions.push("Is the place before, after, behind, or opposite that landmark?");
+    return questions.join("
+");
+  }
+
+  if (names.length === 1) {
+    questions.push(`In ${detectedArea}, is it closer to ${names[0]}, or another known place?`);
+    questions.push("What type of place is the rider near — shop, market, school, filling station, church, hospital, or main road?");
+    questions.push("Is it before, after, behind, or opposite that place?");
+    return questions.join("
+");
+  }
+
+  if (clueType) {
+    questions.push(`In ${detectedArea}, what known place is that ${clueType} close to?`);
+    questions.push("Is it near a market, school, filling station, church, hospital, police station, or main road?");
+    questions.push("When coming from town, is it before, after, behind, or opposite that known place?");
+    return questions.join("
+");
+  }
+
+  questions.push(`In ${detectedArea}, what known place is it close to?`);
+  questions.push("Is that nearby place a market, school, filling station, church, hospital, police station, or main road?");
+  questions.push("When coming from town, is it before, after, behind, or opposite that place?");
+  return questions.join("
+");
 }
 
 function isUnknownLocationDiscoveryNeeded(message = "", routeUnderstanding = {}) {
@@ -1142,7 +1206,7 @@ async function mauriceFindLocationFromSupabase(message = "") {
       detectedArea,
       confidence: best?.confidence || 0,
       candidates,
-      question: buildMauriceLocationQuestion({ detectedArea, candidates })
+      question: buildMauriceLocationQuestion({ detectedArea, candidates, message })
     };
   }
 
@@ -1556,13 +1620,13 @@ OPERATIONAL RULES:
 - If price data is missing, say naturally: "I don’t have enough system data to price that trip yet."
 - If route confidence is medium, ask one short natural confirmation question.
 - If route confidence is low, ask for clearer pickup and dropoff.
-- If maurice_location.status is "needs_more_info", ask exactly ONE short question from maurice_location.question. Do not add a second question.
+- If maurice_location.status is "needs_more_info", ask up to THREE short, natural questions from maurice_location.question. Keep them human, varied, and useful. Do not sound robotic or repetitive.
 - If maurice_location.status is "ready_to_price", give the closest landmark, estimated km range, estimated MWK fare range, confidence level, and a short driver confirmation note.
 - Never say "route not found". Say you are narrowing the place down.
 - Use MWK format for money, for example: "MWK 11,000".
 
 RESPONSE LENGTH:
-- For operational requests: usually 1–2 sentences, but allow personality.
+- For operational requests: usually 1–3 short sentences/questions, but allow personality when clarifying locations.
 - For general chat: 1–4 sentences allowed if natural.
 - Do not be dry.
 - Do not write essays unless the user asks.
