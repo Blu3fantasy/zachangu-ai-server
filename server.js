@@ -531,28 +531,14 @@ function parseTapiwaJson(aiRawText = "") {
   const extracted = extractJsonObject(aiRawText);
 
   if (!extracted) {
-    return {
-      category: "system_issue",
-      risk_level: "low",
-      internal_summary: "Tapiwa returned empty or non-JSON output",
-      team_message: pickHumanErrorMessage(),
-      requires_supervisor_approval: false,
-      opening_used: ""
-    };
+    throw new Error("Tapiwa returned empty or non-JSON output");
   }
 
   try {
     return JSON.parse(extracted);
   } catch (error) {
     console.warn("Tapiwa JSON parse failed:", error.message, "RAW:", String(aiRawText || "").slice(0, 500));
-    return {
-      category: "system_issue",
-      risk_level: "low",
-      internal_summary: "Tapiwa returned malformed JSON",
-      team_message: pickHumanErrorMessage(),
-      requires_supervisor_approval: false,
-      opening_used: ""
-    };
+    throw new Error(`Tapiwa returned malformed JSON: ${error.message}`);
   }
 }
 
@@ -577,7 +563,8 @@ async function callTapiwaGemini({ systemPrompt, userPayload, operationalMode, hi
           temperature: highRisk ? 0.35 : operationalMode ? 0.65 : 0.9,
           topP: highRisk ? 0.75 : 0.95,
           topK: highRisk ? 32 : 64,
-          maxOutputTokens: operationalMode ? 320 : 450
+          maxOutputTokens: operationalMode ? 600 : 500,
+          responseMimeType: "application/json"
         }
       })
     },
@@ -2069,27 +2056,48 @@ Do not wrap JSON in markdown code fences.
       }
     } catch (geminiError) {
       console.error("TAPIWA GEMINI ERROR:", geminiError.message);
-      const humanError = pickHumanErrorMessage();
+      const fallbackMessage = mauriceLocation?.status === "needs_more_info" && mauriceLocation?.question
+        ? buildLocationDiscoveryNeedsMoreInfoMessage(mauriceLocation)
+        : pickHumanErrorMessage();
+      const fallbackCategory = mauriceLocation?.status === "needs_more_info" ? "pricing_issue" : "system_issue";
+      const fallbackSummary = mauriceLocation?.status === "needs_more_info"
+        ? `Gemini failed; Maurice clarification preserved for ${mauriceLocation.activeTarget || "location"}`
+        : "Tapiwa Gemini error";
 
       await saveAuditLog({
         user_message: message,
         clean_message: cleanMessage,
         success: false,
         error_message: geminiError.message,
-        raw_ai_response: aiRawText || null
+        raw_ai_response: aiRawText || null,
+        team_message: fallbackMessage,
+        ai_category: fallbackCategory,
+        internal_summary: fallbackSummary
       });
 
       return res.json({
         ignored: false,
-        category: "system_issue",
+        category: fallbackCategory,
         risk_level: "low",
-        internal_summary: "Tapiwa Gemini error",
-        team_message: humanError,
+        internal_summary: fallbackSummary,
+        team_message: fallbackMessage,
         requires_supervisor_approval: false,
-        used_data: {},
+        used_data: {
+          computed_fare: computedFare || null,
+          route_understanding: {
+            confidence: routeUnderstanding?.confidence,
+            pickup: routeUnderstanding?.pickup?.Landmark_Name,
+            dropoff: routeUnderstanding?.dropoff?.Landmark_Name
+          },
+          maurice: mauriceData,
+          maurice_location: mauriceLocation
+        },
         persona_version: PERSONA_VERSION,
         provider: TAPIWA_PROVIDER,
-        model: TAPIWA_MODEL
+        model: TAPIWA_MODEL,
+        routed_to_maurice: useMaurice,
+        maurice: mauriceData,
+        maurice_location: mauriceLocation
       });
     }
 
@@ -2106,10 +2114,8 @@ Do not wrap JSON in markdown code fences.
         };
 
  if (mauriceLocation?.status === "needs_more_info") {
-  // Let Tapiwa keep her natural tone. Only enforce if Gemini failed or returned something too thin.
-  if (!normalizedAi.team_message || normalizedAi.team_message.length < 15) {
-    normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
-  }
+  // Phase 1 safety fix: Maurice's clarification question must never be overwritten by Gemini prose or fallback text.
+  normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
 } else {
   normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
 }
