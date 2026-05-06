@@ -2105,9 +2105,8 @@ Do not wrap JSON in markdown code fences.
           opening_used: String(aiResult.opening_used || "")
         };
 
-    if (mauriceLocation?.status === "needs_more_info") {
-      // Let Tapiwa keep her natural tone. Only enforce if Gemini failed or returned something too thin.
-      if (mauriceLocation?.status === "needs_more_info") {
+ if (mauriceLocation?.status === "needs_more_info") {
+  // Let Tapiwa keep her natural tone. Only enforce if Gemini failed or returned something too thin.
   if (!normalizedAi.team_message || normalizedAi.team_message.length < 15) {
     normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
   }
