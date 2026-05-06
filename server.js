@@ -69,6 +69,8 @@ function isOriginAllowed(origin) {
 }
 
 const app = express();
+// Railway proxy fix for express-rate-limit
+app.set("trust proxy", 1);
 app.use(cors({
   origin(origin, callback) {
     if (isOriginAllowed(origin)) return callback(null, true);
@@ -2105,12 +2107,13 @@ Do not wrap JSON in markdown code fences.
 
     if (mauriceLocation?.status === "needs_more_info") {
       // Let Tapiwa keep her natural tone. Only enforce if Gemini failed or returned something too thin.
-      if (!normalizedAi.team_message || normalizedAi.team_message.length < 15) {
-        normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
-      }
-    } else {
-      normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
-    }
+      if (mauriceLocation?.status === "needs_more_info") {
+  if (!normalizedAi.team_message || normalizedAi.team_message.length < 15) {
+    normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
+  }
+} else {
+  normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
+}
 
     const category = normalizedAi.category;
     const riskLevel = normalizedAi.risk_level;
