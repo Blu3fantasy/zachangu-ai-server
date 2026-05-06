@@ -509,12 +509,46 @@ function buildDuplicateSafeFallback({ cleanMessage, detectedIntent, routeUnderst
 
 function extractJsonObject(text = "") {
   const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  // Gemini sometimes wraps JSON in markdown fences. Strip them safely.
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1].trim() : raw;
+  const candidate = (fenced ? fenced[1] : raw).trim();
+
   const start = candidate.indexOf("{");
   const end = candidate.lastIndexOf("}");
   if (start >= 0 && end > start) return candidate.slice(start, end + 1);
-  return candidate;
+
+  return null;
+}
+
+function parseTapiwaJson(aiRawText = "") {
+  const extracted = extractJsonObject(aiRawText);
+
+  if (!extracted) {
+    return {
+      category: "system_issue",
+      risk_level: "low",
+      internal_summary: "Tapiwa returned empty or non-JSON output",
+      team_message: pickHumanErrorMessage(),
+      requires_supervisor_approval: false,
+      opening_used: ""
+    };
+  }
+
+  try {
+    return JSON.parse(extracted);
+  } catch (error) {
+    console.warn("Tapiwa JSON parse failed:", error.message, "RAW:", String(aiRawText || "").slice(0, 500));
+    return {
+      category: "system_issue",
+      risk_level: "low",
+      internal_summary: "Tapiwa returned malformed JSON",
+      team_message: pickHumanErrorMessage(),
+      requires_supervisor_approval: false,
+      opening_used: ""
+    };
+  }
 }
 
 async function callTapiwaGemini({ systemPrompt, userPayload, operationalMode, highRisk }) {
@@ -1684,7 +1718,7 @@ Do not wrap JSON in markdown code fences.
         highRisk: highRiskMode
       });
 
-      aiResult = JSON.parse(extractJsonObject(aiRawText));
+      aiResult = parseTapiwaJson(aiRawText);
 
       if (responseLooksRepeated(memory, aiResult.team_message)) {
         aiResult.team_message = buildDuplicateSafeFallback({
