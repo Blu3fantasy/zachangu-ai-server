@@ -28,6 +28,7 @@ const MAURICE_ENABLED = process.env.MAURICE_ENABLED !== "false";
 const MAURICE_MODEL = process.env.MAURICE_MODEL || GROQ_MODEL;
 const MAURICE_MAX_TOKENS = Number(process.env.MAURICE_MAX_TOKENS || 800);
 const MAURICE_TEMPERATURE = Number(process.env.MAURICE_TEMPERATURE || 0.1);
+const TAPIWA_MAX_OUTPUT_TOKENS = Number(process.env.TAPIWA_MAX_OUTPUT_TOKENS || 900);
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON || "";
@@ -51,6 +52,26 @@ const STATIC_TABLE_CACHE = new Set([
   "tapiwa_zone_behavior",
   "tapiwa_route_learning"
 ]);
+
+const TAPIWA_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  required: [
+    "category",
+    "risk_level",
+    "internal_summary",
+    "team_message",
+    "requires_supervisor_approval",
+    "opening_used"
+  ],
+  properties: {
+    category: { type: "STRING" },
+    risk_level: { type: "STRING" },
+    internal_summary: { type: "STRING" },
+    team_message: { type: "STRING" },
+    requires_supervisor_approval: { type: "BOOLEAN" },
+    opening_used: { type: "STRING" }
+  }
+};
 
 function parseCsvList(value = "") {
   return String(value)
@@ -531,14 +552,23 @@ function parseTapiwaJson(aiRawText = "") {
   const extracted = extractJsonObject(aiRawText);
 
   if (!extracted) {
-    throw new Error("Tapiwa returned empty or non-JSON output");
+    const missingJsonError = new Error("Tapiwa returned empty or non-JSON output");
+    missingJsonError.code = "TAPIWA_JSON_MISSING";
+    throw missingJsonError;
   }
 
   try {
-    return JSON.parse(extracted);
+    const parsed = JSON.parse(extracted);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      const invalidTypeError = new Error("Tapiwa JSON must be an object");
+      invalidTypeError.code = "TAPIWA_JSON_NOT_OBJECT";
+      throw invalidTypeError;
+    }
+    return parsed;
   } catch (error) {
     console.warn("Tapiwa JSON parse failed:", error.message, "RAW:", String(aiRawText || "").slice(0, 500));
-    throw new Error(`Tapiwa returned malformed JSON: ${error.message}`);
+    if (!error.code) error.code = "TAPIWA_JSON_MALFORMED";
+    throw error;
   }
 }
 
@@ -563,8 +593,9 @@ async function callTapiwaGemini({ systemPrompt, userPayload, operationalMode, hi
           temperature: highRisk ? 0.35 : operationalMode ? 0.65 : 0.9,
           topP: highRisk ? 0.75 : 0.95,
           topK: highRisk ? 32 : 64,
-          maxOutputTokens: operationalMode ? 600 : 500,
-          responseMimeType: "application/json"
+          maxOutputTokens: TAPIWA_MAX_OUTPUT_TOKENS,
+          responseMimeType: "application/json",
+          responseSchema: TAPIWA_RESPONSE_SCHEMA
         }
       })
     },
@@ -1249,6 +1280,31 @@ function discoveryTargetNeedsWork(target) {
   return Boolean(target && target.status !== "resolved" && target.status !== "not_needed");
 }
 
+function routeFragmentChangedSignificantly(nextValue = "", currentValue = "") {
+  const next = sanitizeRouteFragment(nextValue);
+  const current = sanitizeRouteFragment(currentValue);
+  if (!next || !current || next === current) return false;
+  if (next.includes(current) || current.includes(next)) return false;
+  return true;
+}
+
+function shouldRestartPendingLocationDiscovery({ discovery, explicitRoute, cleanMessage }) {
+  if (!discovery) return true;
+  if (!explicitRoute) return false;
+
+  const pickupNeedsWork = discoveryTargetNeedsWork(discovery.pickup);
+  const dropoffNeedsWork = discoveryTargetNeedsWork(discovery.dropoff);
+  const hasWorkRemaining = pickupNeedsWork || dropoffNeedsWork;
+  if (!hasWorkRemaining) return true;
+
+  const hasExplicitNewRouteSignal = /new route|another route|instead|change route|wrong route|correction/.test(normalizeText(cleanMessage));
+  if (hasExplicitNewRouteSignal || isCorrectionMessage(cleanMessage)) return true;
+
+  const pickupChanged = routeFragmentChangedSignificantly(explicitRoute.pickupRaw, discovery.pickup?.raw || "");
+  const dropoffChanged = routeFragmentChangedSignificantly(explicitRoute.dropoffRaw, discovery.dropoff?.raw || "");
+  return pickupChanged || dropoffChanged;
+}
+
 function appendDiscoveryAnswer(target, message = "") {
   if (!target || !message) return;
   const clean = String(message || "").trim();
@@ -1311,11 +1367,18 @@ async function runPendingLocationDiscovery({ memory, cleanMessage, routeUndersta
     : null;
 
   const explicitRoute = extractRouteParts(cleanMessage);
-  if (!discovery || explicitRoute) {
+  if (shouldRestartPendingLocationDiscovery({ discovery, explicitRoute, cleanMessage })) {
     discovery = initializePendingLocationDiscovery(routeUnderstanding, cleanMessage);
   } else {
     if (!discovery.pickup || typeof discovery.pickup !== "object") discovery.pickup = createPendingLocationTarget(routeUnderstanding?.pickupRaw || "", "pending");
     if (!discovery.dropoff || typeof discovery.dropoff !== "object") discovery.dropoff = createPendingLocationTarget(routeUnderstanding?.dropoffRaw || "", "not_needed");
+    if (explicitRoute?.pickupRaw && discovery.pickup?.status !== "resolved" && !discovery.pickup.raw) {
+      discovery.pickup.raw = String(explicitRoute.pickupRaw);
+    }
+    if (explicitRoute?.dropoffRaw && discovery.dropoff?.status !== "resolved" && !discovery.dropoff.raw) {
+      discovery.dropoff.raw = String(explicitRoute.dropoffRaw);
+      if (discovery.dropoff.status === "not_needed") discovery.dropoff.status = "pending";
+    }
     if (!discovery.pickup.raw && routeUnderstanding?.pickupRaw) discovery.pickup.raw = String(routeUnderstanding.pickupRaw);
     if (!discovery.dropoff.raw && routeUnderstanding?.dropoffRaw) {
       discovery.dropoff.raw = String(routeUnderstanding.dropoffRaw);
@@ -2034,6 +2097,7 @@ Do not wrap JSON in markdown code fences.
 
     // â”€â”€ Call Gemini for Tapiwa (no Groq fallback) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let aiRawText = "";
+    let geminiFailure = null;
     try {
       aiRawText = await callTapiwaGemini({
         systemPrompt,
@@ -2055,50 +2119,16 @@ Do not wrap JSON in markdown code fences.
         aiResult.internal_summary = `${aiResult.internal_summary || cleanMessage} (duplicate-safe rewrite applied)`;
       }
     } catch (geminiError) {
+      geminiFailure = geminiError;
       console.error("TAPIWA GEMINI ERROR:", geminiError.message);
-      const fallbackMessage = mauriceLocation?.status === "needs_more_info" && mauriceLocation?.question
-        ? buildLocationDiscoveryNeedsMoreInfoMessage(mauriceLocation)
-        : pickHumanErrorMessage();
-      const fallbackCategory = mauriceLocation?.status === "needs_more_info" ? "pricing_issue" : "system_issue";
-      const fallbackSummary = mauriceLocation?.status === "needs_more_info"
-        ? `Gemini failed; Maurice clarification preserved for ${mauriceLocation.activeTarget || "location"}`
-        : "Tapiwa Gemini error";
-
-      await saveAuditLog({
-        user_message: message,
-        clean_message: cleanMessage,
-        success: false,
-        error_message: geminiError.message,
-        raw_ai_response: aiRawText || null,
-        team_message: fallbackMessage,
-        ai_category: fallbackCategory,
-        internal_summary: fallbackSummary
-      });
-
-      return res.json({
-        ignored: false,
-        category: fallbackCategory,
+      aiResult = {
+        category: "system_issue",
         risk_level: "low",
-        internal_summary: fallbackSummary,
-        team_message: fallbackMessage,
+        internal_summary: `Tapiwa output failure (${geminiError.code || "gemini_error"})`,
+        team_message: pickHumanErrorMessage(),
         requires_supervisor_approval: false,
-        used_data: {
-          computed_fare: computedFare || null,
-          route_understanding: {
-            confidence: routeUnderstanding?.confidence,
-            pickup: routeUnderstanding?.pickup?.Landmark_Name,
-            dropoff: routeUnderstanding?.dropoff?.Landmark_Name
-          },
-          maurice: mauriceData,
-          maurice_location: mauriceLocation
-        },
-        persona_version: PERSONA_VERSION,
-        provider: TAPIWA_PROVIDER,
-        model: TAPIWA_MODEL,
-        routed_to_maurice: useMaurice,
-        maurice: mauriceData,
-        maurice_location: mauriceLocation
-      });
+        opening_used: ""
+      };
     }
 
     // â”€â”€ Sanitise model output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2113,12 +2143,10 @@ Do not wrap JSON in markdown code fences.
           opening_used: String(aiResult.opening_used || "")
         };
 
- if (mauriceLocation?.status === "needs_more_info") {
-  // Phase 1 safety fix: Maurice's clarification question must never be overwritten by Gemini prose or fallback text.
-  normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
-} else {
-  normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
-}
+    normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
+    if (geminiFailure && !mauriceLocation) {
+      normalizedAi.internal_summary = `${normalizedAi.internal_summary} (fallback after Gemini failure)`.slice(0, 300);
+    }
 
     const category = normalizedAi.category;
     const riskLevel = normalizedAi.risk_level;
@@ -2165,7 +2193,8 @@ Do not wrap JSON in markdown code fences.
       internal_summary: normalizedAi.internal_summary,
       used_data: responsePayload.used_data,
       raw_ai_response: aiResult,
-      success: true
+      success: !geminiFailure,
+      error_message: geminiFailure ? String(geminiFailure.message || geminiFailure).slice(0, 500) : null
     });
 
     return res.json(responsePayload);
