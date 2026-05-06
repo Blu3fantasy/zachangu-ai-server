@@ -222,7 +222,7 @@ if (ENABLE_SECURE_DEBUG_ROUTES) {
   });
 }
 
-// ── UTILS ──────────────────────────────────────────────────────────────────────
+// â”€â”€ UTILS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function hasTapiwaCall(message) { return /@tapiwa/i.test(String(message || "")); }
 function cleanTapiwaMessage(message) { return String(message || "").replace(/@tapiwa/gi, "").trim(); }
@@ -285,6 +285,7 @@ function loadConversationMemoryFromDisk() {
       conversationMemory.set(sessionId, {
         lastRoute: memory.lastRoute || null,
         pendingConfirmation: memory.pendingConfirmation || null,
+        pendingLocationDiscovery: memory.pendingLocationDiscovery && typeof memory.pendingLocationDiscovery === "object" ? memory.pendingLocationDiscovery : null,
         confirmedRoute: memory.confirmedRoute || null,
         lastAssistTopic: memory.lastAssistTopic || null,
         recentResponses: Array.isArray(memory.recentResponses) ? memory.recentResponses.slice(-8) : [],
@@ -309,6 +310,7 @@ function getConversationMemory(sessionId) {
     conversationMemory.set(sessionId, {
       lastRoute: null,
       pendingConfirmation: null,
+      pendingLocationDiscovery: null,
       confirmedRoute: null,
       lastAssistTopic: null,
       recentResponses: [],
@@ -328,6 +330,7 @@ function saveConversationMemory(sessionId, memory) {
   conversationMemory.set(sessionId, {
     lastRoute: memory.lastRoute || null,
     pendingConfirmation: memory.pendingConfirmation || null,
+    pendingLocationDiscovery: memory.pendingLocationDiscovery && typeof memory.pendingLocationDiscovery === "object" ? memory.pendingLocationDiscovery : null,
     confirmedRoute: memory.confirmedRoute || null,
     lastAssistTopic: memory.lastAssistTopic || null,
     recentResponses: Array.isArray(memory.recentResponses) ? memory.recentResponses.slice(-8) : [],
@@ -348,7 +351,7 @@ setInterval(() => {
 }, 1000 * 60 * 5).unref?.();
 
 
-// ── TAPIWA GEMINI PERSONALITY HELPERS ─────────────────────────────────────────
+// â”€â”€ TAPIWA GEMINI PERSONALITY HELPERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function detectTapiwaIntent(message = "") {
   const text = normalizeText(message);
@@ -414,16 +417,16 @@ function getBlantyreDateTime() {
 
 function pickHumanErrorMessage() {
   const phrases = [
-    "Shaaaah 😅 system ikuvuta pang’ono—hold on, zitekha pompano.",
-    "Hmm… looks like the system is dragging a bit. Give me a sec.",
-    "Eish, small hiccup here 😄 let me catch it properly.",
-    "System’s being stubborn today, koma tili pompo—try again in a moment.",
-    "Something’s not responding properly on my side, but don’t panic, we’ll sort it.",
-    "Ahh this one has tripped the system a bit 😅 hold on.",
-    "Small technical drama here, koma tikuyenda bwino—try again.",
-    "Looks like Tapiwa’s line to the system is shaking a bit. Give it a moment.",
-    "Shaaaah guys, system ikupanga ma style 😅 hold on.",
-    "Bit of a slow moment here, koma I’m still with you."
+    "Shaaaah ðŸ˜… system ikuvuta pangâ€™onoâ€”hold on, zitekha pompano.",
+    "Hmmâ€¦ looks like the system is dragging a bit. Give me a sec.",
+    "Eish, small hiccup here ðŸ˜„ let me catch it properly.",
+    "Systemâ€™s being stubborn today, koma tili pompoâ€”try again in a moment.",
+    "Somethingâ€™s not responding properly on my side, but donâ€™t panic, weâ€™ll sort it.",
+    "Ahh this one has tripped the system a bit ðŸ˜… hold on.",
+    "Small technical drama here, koma tikuyenda bwinoâ€”try again.",
+    "Looks like Tapiwaâ€™s line to the system is shaking a bit. Give it a moment.",
+    "Shaaaah guys, system ikupanga ma style ðŸ˜… hold on.",
+    "Bit of a slow moment here, koma Iâ€™m still with you."
   ];
   return phrases[Math.floor(Math.random() * phrases.length)];
 }
@@ -441,7 +444,7 @@ function updateUserToneProfile(memory, message = "") {
   const text = String(message || "");
   const profile = memory.userProfile && typeof memory.userProfile === "object" ? memory.userProfile : {};
   profile.message_count = Number(profile.message_count || 0) + 1;
-  profile.prefers_humour = profile.prefers_humour || /haha|lol|😂|😅|joke|funny|shaaa|shaah|bo/i.test(text);
+  profile.prefers_humour = profile.prefers_humour || /haha|lol|ðŸ˜‚|ðŸ˜…|joke|funny|shaaa|shaah|bo/i.test(text);
   profile.brief_style = text.length < 35;
   profile.uses_chichewa = profile.uses_chichewa || /\b(bo|muli|bwanji|eya|inde|zikomo|koma|pang'ono|pompano|zili|tikuyenda)\b/i.test(text);
   profile.last_seen_at = new Date().toISOString();
@@ -478,14 +481,14 @@ function responseLooksRepeated(memory, response = "") {
 
 function pickLocalJoke(memory) {
   const jokes = [
-    "A dispatcher told the map, ‘be honest, are we routing or guessing today?’ The map just zoomed out and kept quiet 😄",
-    "One customer said ‘I’m just nearby’… shaaah, in Malawi that can mean 200 metres or a whole zone away 😅",
-    "Fuel prices looked at our fare calculator and said, ‘make space, I’m joining the meeting.’",
-    "A driver once said ‘I’m two minutes away.’ Even the clock laughed pang’ono 😄",
-    "Dispatch life: customer says ‘pa corner’ like Lilongwe has only one corner. Shaaaah 😅",
+    "A dispatcher told the map, â€˜be honest, are we routing or guessing today?â€™ The map just zoomed out and kept quiet ðŸ˜„",
+    "One customer said â€˜Iâ€™m just nearbyâ€™â€¦ shaaah, in Malawi that can mean 200 metres or a whole zone away ðŸ˜…",
+    "Fuel prices looked at our fare calculator and said, â€˜make space, Iâ€™m joining the meeting.â€™",
+    "A driver once said â€˜Iâ€™m two minutes away.â€™ Even the clock laughed pangâ€™ono ðŸ˜„",
+    "Dispatch life: customer says â€˜pa cornerâ€™ like Lilongwe has only one corner. Shaaaah ðŸ˜…",
     "The route was so confusing even ORS wanted a cup of tea before answering.",
-    "A map without landmarks in Malawi is just vibes and prayers, koma tikuyenda 😄",
-    "Customer: ‘I’m at the shop.’ Dispatcher: ‘Which shop?’ Customer: ‘The one everyone knows.’ Malawi classic 😅"
+    "A map without landmarks in Malawi is just vibes and prayers, koma tikuyenda ðŸ˜„",
+    "Customer: â€˜Iâ€™m at the shop.â€™ Dispatcher: â€˜Which shop?â€™ Customer: â€˜The one everyone knows.â€™ Malawi classic ðŸ˜…"
   ];
   if (!Array.isArray(memory.recentJokes)) memory.recentJokes = [];
   const available = jokes.filter(j => !memory.recentJokes.includes(j));
@@ -500,11 +503,11 @@ function buildDuplicateSafeFallback({ cleanMessage, detectedIntent, routeUnderst
   if (detectedIntent === "price_request") {
     const pickup = routeUnderstanding?.pickup?.Landmark_Name || routeUnderstanding?.pickupRaw || "the pickup";
     const dropoff = routeUnderstanding?.dropoff?.Landmark_Name || routeUnderstanding?.dropoffRaw || "the drop-off";
-    if (computedFare?.recommended_mwk) return `For ${pickup} → ${dropoff}, I’d guide around MWK ${Number(computedFare.recommended_mwk).toLocaleString("en-US")}. Not bad, tikuyenda 😄`;
-    if (routeUnderstanding?.confidence === "medium") return `Just to avoid pricing ghosts 😅 are we confirming ${pickup} → ${dropoff}?`;
-    return "I don’t have enough system data to price that trip yet — send me the pickup and drop-off clearly and we’ll sort it.";
+    if (computedFare?.recommended_mwk) return `For ${pickup} â†’ ${dropoff}, Iâ€™d guide around MWK ${Number(computedFare.recommended_mwk).toLocaleString("en-US")}. Not bad, tikuyenda ðŸ˜„`;
+    if (routeUnderstanding?.confidence === "medium") return `Just to avoid pricing ghosts ðŸ˜… are we confirming ${pickup} â†’ ${dropoff}?`;
+    return "I donâ€™t have enough system data to price that trip yet â€” send me the pickup and drop-off clearly and weâ€™ll sort it.";
   }
-  return "Let me say it differently 😄 I’m with you, but the system needs a cleaner signal on that one.";
+  return "Let me say it differently ðŸ˜„ Iâ€™m with you, but the system needs a cleaner signal on that one.";
 }
 
 function extractJsonObject(text = "") {
@@ -722,7 +725,7 @@ function routeToLookupMessage(route) {
   return `from ${route.pickupRaw || route.pickup || ""} to ${route.dropoffRaw || route.dropoff || ""}`.trim();
 }
 
-// ── NETWORK ────────────────────────────────────────────────────────────────────
+// â”€â”€ NETWORK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
@@ -782,7 +785,7 @@ async function supabaseInsert(table, payload) {
   } catch (error) { tableDebug[table] = { ok: false, insert_error: error.message }; return null; }
 }
 
-// ── LANDMARK MATCHING ──────────────────────────────────────────────────────────
+// â”€â”€ LANDMARK MATCHING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function levenshtein(a, b) {
   a = normalizeText(a); b = normalizeText(b);
@@ -903,7 +906,7 @@ function buildRouteUnderstanding(message, landmarksRaw) {
   };
 }
 
-// ── SLIMMING HELPERS ───────────────────────────────────────────────────────────
+// â”€â”€ SLIMMING HELPERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function getKeywords(message) {
   const stopWords = new Set(["price","fare","cost","from","to","the","for","please","give","estimate","route","how","much","should","we","charge","what","is","that","trip"]);
@@ -928,7 +931,7 @@ function slimTapiwaZoneBehavior(row) { return {zone_code:row.zone_code,zone_name
 function slimTapiwaRouteLearning(row) { return {pickup_zone:row.pickup_zone,dropoff_zone:row.dropoff_zone,pickup_landmark:row.pickup_landmark,dropoff_landmark:row.dropoff_landmark,vehicle_type:row.vehicle_type,trip_count:row.trip_count,avg_final_price:row.avg_final_price,min_final_price:row.min_final_price,max_final_price:row.max_final_price,most_common_price:row.most_common_price,avg_tapiwa_price:row.avg_tapiwa_price,avg_override_difference:row.avg_override_difference,acceptance_rate:row.acceptance_rate}; }
 function slimTapiwaOutcome(row) { return {trip_request_id:row.trip_request_id,tapiwa_recommended_price:row.tapiwa_recommended_price,final_price:row.final_price,price_difference:row.price_difference,price_overridden:row.price_overridden,override_reason:row.override_reason,customer_accepted:row.customer_accepted,driver_accepted:row.driver_accepted,trip_completed:row.trip_completed,created_at:row.created_at}; }
 
-// ── DATA FETCHING ──────────────────────────────────────────────────────────────
+// â”€â”€ DATA FETCHING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function samePlaceName(a,b) { const l=normalizeText(a),r=normalizeText(b); return Boolean(l&&r&&l===r); }
 function routeMatchesResolvedLandmarks(route,p,d) { return route&&p&&d&&samePlaceName(route.From_Landmark,p)&&samePlaceName(route.To_Landmark,d); }
@@ -1010,7 +1013,7 @@ async function fetchZachanguContext(userMessage) {
 
 
 
-// ── MAURICE LOCATION DISCOVERY (Supabase-backed, no hardcoded landmarks) ──────
+// â”€â”€ MAURICE LOCATION DISCOVERY (Supabase-backed, no hardcoded landmarks) â”€â”€â”€â”€â”€â”€â”€
 
 function detectLocationAreaHint(text = "") {
   const clean = normalizeText(text);
@@ -1143,9 +1146,9 @@ function buildMauriceLocationQuestion({ detectedArea, candidates, message = "" }
     questions.push(
       clueType
         ? `Which area is that ${clueType} in? Area 25, Area 49, Area 36, Kanengo, City Centre, or somewhere else?`
-        : "Which area is that place in — Area 25, Area 49, Area 36, Kanengo, City Centre, or somewhere else?"
+        : "Which area is that place in â€” Area 25, Area 49, Area 36, Kanengo, City Centre, or somewhere else?"
     );
-    questions.push("What known place is it close to — a market, school, filling station, church, hospital, police station, or main road?");
+    questions.push("What known place is it close to â€” a market, school, filling station, church, hospital, police station, or main road?");
     questions.push("When coming from town, is it before or after that known place?");
     return questions.join("\n");
   }
@@ -1153,14 +1156,14 @@ function buildMauriceLocationQuestion({ detectedArea, candidates, message = "" }
   if (names.length >= 2) {
     questions.push(`In ${detectedArea}, is it closer to ${names.join(", ")}, or another known place?`);
     questions.push("Is it before or after that place when coming from town?");
-    questions.push("What should the driver look for nearby — shop name, church, school, filling station, or road sign?");
+    questions.push("What should the driver look for nearby â€” shop name, church, school, filling station, or road sign?");
     return questions.join("\n");
   }
 
   if (names.length === 1) {
     questions.push(`In ${detectedArea}, is it closer to ${names[0]}, or another known place nearby?`);
     questions.push(`Is it before or after ${names[0]} when coming from town?`);
-    questions.push("What visible place should the driver look for — shop, church, school, filling station, or road sign?");
+    questions.push("What visible place should the driver look for â€” shop, church, school, filling station, or road sign?");
     return questions.join("\n");
   }
 
@@ -1171,7 +1174,7 @@ function buildMauriceLocationQuestion({ detectedArea, candidates, message = "" }
     return questions.join("\n");
   }
 
-  questions.push(`In ${detectedArea}, what is it close to — a market, school, filling station, church, hospital, police station, or main road?`);
+  questions.push(`In ${detectedArea}, what is it close to â€” a market, school, filling station, church, hospital, police station, or main road?`);
   questions.push("Is it before or after that known place when coming from town?");
   questions.push("What visible sign or shop name should the driver look for nearby?");
   return questions.join("\n");
@@ -1183,6 +1186,228 @@ function isUnknownLocationDiscoveryNeeded(message = "", routeUnderstanding = {})
   const locationWords = /where|place|landmark|near|close|pafupi|kufupi|shop|church|school|market|msika|fuel|hospital|clinic|area|ma\s?\d+|pickup|dropoff|from|to|route|distance|km|price|fare|cost/.test(text);
   const routeNotClear = !routeUnderstanding?.hasRoute || ["low", "medium"].includes(routeUnderstanding?.confidence);
   return locationWords && routeNotClear;
+}
+
+function buildResolvedDiscoveryBestMatch(landmark = {}, raw = "", score = 0.92) {
+  const closestLandmark = landmark?.Landmark_Name || landmark?.closestLandmark || raw || null;
+  const area = landmark?.Area || landmark?.area || null;
+  const zone = landmark?.Zone_ID || landmark?.zone || null;
+  const confidence = Math.max(Number(score || 0), 0.72);
+  const estimatedDistanceKm = estimateUnknownLocationDistanceKm(confidence);
+  const estimatedFareMwk = estimateUnknownLocationBikeFare(estimatedDistanceKm);
+
+  return {
+    status: "ready_to_price",
+    closestLandmark,
+    area,
+    zone,
+    confidence,
+    estimatedDistanceKm,
+    estimatedFareMwk,
+    candidates: closestLandmark ? [{ name: closestLandmark, area, zone, confidence }] : [],
+    question: null,
+    driverNote: closestLandmark
+      ? `Customer appears closest to ${closestLandmark}. Driver should call rider when nearby to confirm exact pickup point.`
+      : "Driver should call rider when nearby to confirm the exact point."
+  };
+}
+
+function createPendingLocationTarget(raw = "", status = "pending") {
+  return {
+    raw: String(raw || "").trim(),
+    answers: [],
+    status,
+    bestMatch: null
+  };
+}
+
+function initializePendingLocationDiscovery(routeUnderstanding = {}, message = "") {
+  const parts = extractRouteParts(message) || {};
+  const pickupRaw = String(routeUnderstanding?.pickupRaw || parts.pickupRaw || "").trim();
+  const dropoffRaw = String(routeUnderstanding?.dropoffRaw || parts.dropoffRaw || "").trim();
+  const pickupResolved = Boolean(routeUnderstanding?.pickup?.Landmark_Name);
+  const dropoffResolved = Boolean(routeUnderstanding?.dropoff?.Landmark_Name);
+  const hasBoth = Boolean(pickupRaw && dropoffRaw);
+  const fallbackRaw = String(message || "").trim();
+  const pickupTarget = createPendingLocationTarget(pickupRaw || (!dropoffRaw ? fallbackRaw : ""), pickupResolved ? "resolved" : "pending");
+  const dropoffTarget = hasBoth
+    ? createPendingLocationTarget(dropoffRaw, dropoffResolved ? "resolved" : "pending")
+    : createPendingLocationTarget("", "not_needed");
+
+  if (pickupResolved) {
+    pickupTarget.bestMatch = buildResolvedDiscoveryBestMatch(
+      routeUnderstanding.pickup,
+      pickupRaw || fallbackRaw,
+      routeUnderstanding?.pickup_score || 0.92
+    );
+  }
+  if (dropoffResolved) {
+    dropoffTarget.bestMatch = buildResolvedDiscoveryBestMatch(
+      routeUnderstanding.dropoff,
+      dropoffRaw,
+      routeUnderstanding?.dropoff_score || 0.92
+    );
+  }
+
+  return {
+    activeTarget: pickupResolved ? (dropoffTarget.status === "pending" ? "dropoff" : "pickup") : "pickup",
+    pickup: pickupTarget,
+    dropoff: dropoffTarget
+  };
+}
+
+function discoveryTargetNeedsWork(target) {
+  return Boolean(target && target.status !== "resolved" && target.status !== "not_needed");
+}
+
+function appendDiscoveryAnswer(target, message = "") {
+  if (!target || !message) return;
+  const clean = String(message || "").trim();
+  if (!clean) return;
+  if (!Array.isArray(target.answers)) target.answers = [];
+  if (!target.answers.includes(clean)) target.answers.push(clean);
+  target.answers = target.answers.slice(-8);
+}
+
+function buildDiscoverySearchText(target, latestMessage = "") {
+  const bits = [target?.raw, ...(Array.isArray(target?.answers) ? target.answers : []), latestMessage]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+  return bits.join(" ; ");
+}
+
+function extractDiscoveryMessageForTarget(message = "", targetName = "pickup") {
+  const parts = extractRouteParts(message);
+  if (!parts) return String(message || "").trim();
+  return targetName === "dropoff" ? String(parts.dropoffRaw || message || "").trim() : String(parts.pickupRaw || message || "").trim();
+}
+
+function rotateDiscoveryLead(targetName = "pickup", iteration = 0) {
+  const pickupLeads = [
+    "Okay, letâ€™s pin pickup down first.",
+    "Good, letâ€™s lock the pickup clearly.",
+    "Nice, pickup first so pricing stays accurate."
+  ];
+  const dropoffLeads = [
+    "Perfect, pickup is clear. Now letâ€™s narrow drop-off.",
+    "Great, pickup sorted. Letâ€™s lock drop-off next.",
+    "Nice one, now drop-off so we can finish the estimate."
+  ];
+  const pool = targetName === "dropoff" ? dropoffLeads : pickupLeads;
+  return pool[Math.abs(Number(iteration || 0)) % pool.length];
+}
+
+function limitDiscoveryQuestions(questionBlock = "", max = 3) {
+  const lines = String(questionBlock || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.slice(0, max);
+}
+
+function advancePendingLocationDiscovery(discovery) {
+  if (!discovery || typeof discovery !== "object") return;
+  const pickupResolved = discovery.pickup?.status === "resolved";
+  const dropoffNeeded = Boolean(discovery.dropoff?.raw);
+  const dropoffResolved = !dropoffNeeded || discovery.dropoff?.status === "resolved" || discovery.dropoff?.status === "not_needed";
+
+  if (!pickupResolved) discovery.activeTarget = "pickup";
+  else if (!dropoffResolved) discovery.activeTarget = "dropoff";
+  else discovery.activeTarget = "dropoff";
+}
+
+async function runPendingLocationDiscovery({ memory, cleanMessage, routeUnderstanding }) {
+  let discovery = memory.pendingLocationDiscovery && typeof memory.pendingLocationDiscovery === "object"
+    ? memory.pendingLocationDiscovery
+    : null;
+
+  const explicitRoute = extractRouteParts(cleanMessage);
+  if (!discovery || explicitRoute) {
+    discovery = initializePendingLocationDiscovery(routeUnderstanding, cleanMessage);
+  } else {
+    if (!discovery.pickup || typeof discovery.pickup !== "object") discovery.pickup = createPendingLocationTarget(routeUnderstanding?.pickupRaw || "", "pending");
+    if (!discovery.dropoff || typeof discovery.dropoff !== "object") discovery.dropoff = createPendingLocationTarget(routeUnderstanding?.dropoffRaw || "", "not_needed");
+    if (!discovery.pickup.raw && routeUnderstanding?.pickupRaw) discovery.pickup.raw = String(routeUnderstanding.pickupRaw);
+    if (!discovery.dropoff.raw && routeUnderstanding?.dropoffRaw) {
+      discovery.dropoff.raw = String(routeUnderstanding.dropoffRaw);
+      if (discovery.dropoff.status === "not_needed") discovery.dropoff.status = "pending";
+    }
+  }
+
+  if (routeUnderstanding?.pickup?.Landmark_Name) {
+    discovery.pickup.status = "resolved";
+    discovery.pickup.bestMatch = buildResolvedDiscoveryBestMatch(
+      routeUnderstanding.pickup,
+      discovery.pickup.raw,
+      routeUnderstanding?.pickup_score || 0.92
+    );
+  }
+  if (routeUnderstanding?.dropoff?.Landmark_Name) {
+    discovery.dropoff.status = "resolved";
+    discovery.dropoff.bestMatch = buildResolvedDiscoveryBestMatch(
+      routeUnderstanding.dropoff,
+      discovery.dropoff.raw,
+      routeUnderstanding?.dropoff_score || 0.92
+    );
+  }
+
+  advancePendingLocationDiscovery(discovery);
+  const targetName = discovery.activeTarget === "dropoff" ? "dropoff" : "pickup";
+  const target = discovery[targetName];
+  if (!target) return null;
+
+  if (target.status !== "resolved") {
+    const targetMessage = extractDiscoveryMessageForTarget(cleanMessage, targetName);
+    appendDiscoveryAnswer(target, targetMessage);
+    const searchText = buildDiscoverySearchText(target, targetMessage);
+    const result = await mauriceFindLocationFromSupabase(searchText);
+    target.bestMatch = result;
+
+    if (result.status === "ready_to_price" && Number(result.confidence || 0) >= 0.65) {
+      target.status = "resolved";
+    } else {
+      target.status = "pending";
+    }
+  }
+
+  advancePendingLocationDiscovery(discovery);
+  memory.pendingLocationDiscovery = discovery;
+
+  const pickupResolved = discovery.pickup?.status === "resolved";
+  const dropoffNeeded = Boolean(discovery.dropoff?.raw);
+  const dropoffResolved = !dropoffNeeded || discovery.dropoff?.status === "resolved" || discovery.dropoff?.status === "not_needed";
+  const done = pickupResolved && dropoffResolved;
+
+  if (done) {
+    const finalMatch = dropoffNeeded ? discovery.dropoff.bestMatch : discovery.pickup.bestMatch;
+    return {
+      ...(finalMatch || {}),
+      status: "ready_to_price",
+      discovery,
+      discovery_complete: true,
+      activeTarget: "dropoff",
+      pickup: discovery.pickup?.bestMatch || null,
+      dropoff: discovery.dropoff?.bestMatch || null
+    };
+  }
+
+  const nextTargetName = discovery.activeTarget === "dropoff" ? "dropoff" : "pickup";
+  const nextTarget = discovery[nextTargetName];
+  const nextBest = nextTarget?.bestMatch || { question: "Which area is that in?" };
+  const followups = limitDiscoveryQuestions(nextBest.question, 3);
+  const lead = rotateDiscoveryLead(nextTargetName, (nextTarget?.answers || []).length);
+  const question = [lead, ...followups].filter(Boolean).join("\n");
+
+  return {
+    status: "needs_more_info",
+    discovery,
+    discovery_complete: false,
+    activeTarget: nextTargetName,
+    confidence: Number(nextBest.confidence || 0),
+    candidates: Array.isArray(nextBest.candidates) ? nextBest.candidates : [],
+    question,
+    followup_questions: followups
+  };
 }
 
 async function mauriceFindLocationFromSupabase(message = "") {
@@ -1250,7 +1475,7 @@ async function mauriceFindLocationFromSupabase(message = "") {
   };
 }
 
-// ── FARE CALCULATION (data only — never used to bypass Groq) ──────────────────
+// â”€â”€ FARE CALCULATION (data only â€” never used to bypass Groq) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function calculateBasicFare(context) {
   const ru = context.route_understanding||{};
@@ -1263,7 +1488,7 @@ function calculateBasicFare(context) {
     const recommended = cleanPrice(tapiwaRule.recommended_price);
     const low = cleanPrice(tapiwaRule.min_price||recommended);
     const high = cleanPrice(tapiwaRule.max_price||recommended);
-    return { source:"tapiwa_market_price_rules", estimated_low_mwk:Math.min(low,high), estimated_high_mwk:Math.max(low,high), recommended_mwk:recommended, confidence:tapiwaRule.confidence||"medium", route_used:`${tapiwaRule.pickup_landmark||"Unknown"} → ${tapiwaRule.dropoff_landmark||"Unknown"}` };
+    return { source:"tapiwa_market_price_rules", estimated_low_mwk:Math.min(low,high), estimated_high_mwk:Math.max(low,high), recommended_mwk:recommended, confidence:tapiwaRule.confidence||"medium", route_used:`${tapiwaRule.pickup_landmark||"Unknown"} â†’ ${tapiwaRule.dropoff_landmark||"Unknown"}` };
   }
 
   const route = (context.route_matrix||[]).find(r=>routeMatchesResolvedLandmarks(r,resolvedPickupName,resolvedDropoffName));
@@ -1276,10 +1501,10 @@ function calculateBasicFare(context) {
   const baseFare = Math.max(distance*rate, minimum, 3000);
   const low = cleanPrice(baseFare*0.95);
   const high = cleanPrice(baseFare*1.08);
-  return { source:"route_matrix_plus_pricing_rules", distance_km:distance, vehicle_type:rule.Vehicle_Type, base_rate_per_km:rate, minimum_fare:minimum, estimated_low_mwk:Math.min(low,high), estimated_high_mwk:Math.max(low,high), recommended_mwk:cleanPrice((low+high)/2), route_used:`${route.From_Landmark} → ${route.To_Landmark}` };
+  return { source:"route_matrix_plus_pricing_rules", distance_km:distance, vehicle_type:rule.Vehicle_Type, base_rate_per_km:rate, minimum_fare:minimum, estimated_low_mwk:Math.min(low,high), estimated_high_mwk:Math.max(low,high), recommended_mwk:cleanPrice((low+high)/2), route_used:`${route.From_Landmark} â†’ ${route.To_Landmark}` };
 }
 
-// ── AUDIT LOG ──────────────────────────────────────────────────────────────────
+// â”€â”€ AUDIT LOG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function saveAuditLog(payload) {
   await supabaseInsert("tapiwa_ai_audit_logs", {
@@ -1348,6 +1573,88 @@ function validateAndNormalizeAiResult(aiResult, cleanMessage = "") {
   };
 }
 
+function buildLocationDiscoveryNeedsMoreInfoMessage(mauriceLocation) {
+  const lines = limitDiscoveryQuestions(mauriceLocation?.question || "Which area is that in?", 3);
+  return String(lines.join("\n"))
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 900);
+}
+
+function buildLocationDiscoveryResolvedMessage(mauriceLocation, computedFare) {
+  const pickupName = mauriceLocation?.pickup?.closestLandmark || mauriceLocation?.closestLandmark || null;
+  const dropoffName = mauriceLocation?.dropoff?.closestLandmark || null;
+  const kmRange = Number(computedFare?.distance_km)
+    ? [Number(computedFare.distance_km), Number(computedFare.distance_km)]
+    : Array.isArray(mauriceLocation?.estimatedDistanceKm)
+      ? mauriceLocation.estimatedDistanceKm
+      : Array.isArray(mauriceLocation?.pickup?.estimatedDistanceKm)
+        ? mauriceLocation.pickup.estimatedDistanceKm
+        : null;
+  const fareLow = Number(computedFare?.estimated_low_mwk || mauriceLocation?.estimatedFareMwk?.[0] || mauriceLocation?.pickup?.estimatedFareMwk?.[0] || 0);
+  const fareHigh = Number(computedFare?.estimated_high_mwk || mauriceLocation?.estimatedFareMwk?.[1] || mauriceLocation?.pickup?.estimatedFareMwk?.[1] || 0);
+  const confidence = Number(
+    mauriceLocation?.dropoff?.confidence
+    || mauriceLocation?.pickup?.confidence
+    || mauriceLocation?.confidence
+    || 0
+  );
+  const confidenceLabel = confidence >= 0.85 ? "high" : confidence >= 0.7 ? "medium-high" : "medium";
+  const routeText = pickupName && dropoffName
+    ? `Pickup looks closest to ${pickupName} and drop-off to ${dropoffName}.`
+    : pickupName
+      ? `That sounds closest to ${pickupName}.`
+      : "We have a workable landmark now.";
+  const kmText = kmRange && kmRange.length >= 2
+    ? ` We're looking at about ${Number(kmRange[0]).toLocaleString("en-US")}â€“${Number(kmRange[1]).toLocaleString("en-US")} km`
+    : "";
+  const fareText = fareLow && fareHigh
+    ? ` and roughly MWK ${fareLow.toLocaleString("en-US")}â€“${fareHigh.toLocaleString("en-US")}.`
+    : ".";
+  const confidenceText = ` Confidence is ${confidenceLabel}.`;
+  const driverNote = sanitizeTeamMessage(
+    mauriceLocation?.driverNote
+    || mauriceLocation?.pickup?.driverNote
+    || "Driver should call when nearby to confirm the exact spot."
+  );
+  return sanitizeTeamMessage(`${routeText}${kmText}${fareText}${confidenceText} ${driverNote}`);
+}
+
+function enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare) {
+  if (!mauriceLocation || typeof normalizedAi !== "object") return normalizedAi;
+
+  if (mauriceLocation.status === "needs_more_info") {
+    return {
+      ...normalizedAi,
+      category: "pricing_issue",
+      risk_level: "low",
+      internal_summary: `Location discovery: ${mauriceLocation.activeTarget || "pickup"} needs more detail`,
+      team_message: buildLocationDiscoveryNeedsMoreInfoMessage(mauriceLocation),
+      requires_supervisor_approval: false
+    };
+  }
+
+  if (mauriceLocation.status === "ready_to_price") {
+    const text = normalizeText(normalizedAi.team_message || "");
+    const shouldOverride = !normalizedAi.team_message
+      || /route not found|i don t know|i dont know|unclear route|cannot find/.test(text);
+
+    if (shouldOverride) {
+      return {
+        ...normalizedAi,
+        category: "pricing_issue",
+        risk_level: "low",
+        internal_summary: normalizedAi.internal_summary || "Location discovery resolved",
+        team_message: buildLocationDiscoveryResolvedMessage(mauriceLocation, computedFare),
+        requires_supervisor_approval: false
+      };
+    }
+  }
+
+  return normalizedAi;
+}
+
 
 
 // Maurice direct test endpoint: use this from Postman before wiring the UI.
@@ -1375,7 +1682,7 @@ app.post("/ai/maurice/location", requireApiAuth, async (req, res) => {
   }
 });
 
-// ── MAIN ENDPOINT ──────────────────────────────────────────────────────────────
+// â”€â”€ MAIN ENDPOINT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 app.post("/ai/analyze", requireApiAuth, async (req, res) => {
   let cleanMessage = "";
@@ -1429,7 +1736,7 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
       return res.json(fastPayload);
     }
 
-    // ── Resolve context — always fetch so Groq has real data ──────────────────
+    // â”€â”€ Resolve context â€” always fetch so Groq has real data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If this is a follow-up about a confirmed route, look up that route
     const isFollowUp = isFollowUpRouteMessage(cleanMessage);
     const hasExplicitRoute = isExplicitRouteMessage(cleanMessage);
@@ -1455,19 +1762,38 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
       context.route_understanding = routeUnderstanding;
     }
 
-    if (isUnknownLocationDiscoveryNeeded(cleanMessage, routeUnderstanding)) {
+    if (isUnknownLocationDiscoveryNeeded(cleanMessage, routeUnderstanding) || memory.pendingLocationDiscovery) {
       try {
-        mauriceLocation = await mauriceFindLocationFromSupabase(cleanMessage);
+        mauriceLocation = await runPendingLocationDiscovery({
+          memory,
+          cleanMessage,
+          routeUnderstanding
+        });
       } catch (locationError) {
         console.warn("Maurice location discovery failed:", locationError.message);
         mauriceLocation = {
           status: "needs_more_info",
           confidence: 0,
           candidates: [],
-          question: "What known place is it close to? A market, school, filling station, church, hospital, or main road?",
+          question: "Okay, letâ€™s pin this down. Which area is that in?\nWhat known place is it close to â€” market, school, filling station, church, hospital, or main road?\nIs it before or after that place when coming from town?",
           error: locationError.message
         };
       }
+    }
+
+    if (mauriceLocation?.discovery_complete && mauriceLocation?.pickup?.closestLandmark && mauriceLocation?.dropoff?.closestLandmark) {
+      const resolvedLookupMessage = `from ${mauriceLocation.pickup.closestLandmark} to ${mauriceLocation.dropoff.closestLandmark}`;
+      context = await fetchZachanguContext(resolvedLookupMessage);
+      routeUnderstanding = {
+        hasRoute: true,
+        confidence: "high",
+        pickupRaw: mauriceLocation.discovery?.pickup?.raw || mauriceLocation.pickup.closestLandmark,
+        dropoffRaw: mauriceLocation.discovery?.dropoff?.raw || mauriceLocation.dropoff.closestLandmark,
+        pickup: { Landmark_Name: mauriceLocation.pickup.closestLandmark },
+        dropoff: { Landmark_Name: mauriceLocation.dropoff.closestLandmark },
+        note: "Route resolved through staged location discovery."
+      };
+      context.route_understanding = routeUnderstanding;
     }
 
     const useMaurice = shouldUseMaurice(cleanMessage) || Boolean(memory.pendingConfirmation && isAffirmationMessage(cleanMessage)) || Boolean(mauriceLocation);
@@ -1479,6 +1805,7 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
           memory: {
             lastRoute: memory.lastRoute,
             pendingConfirmation: memory.pendingConfirmation,
+            pendingLocationDiscovery: memory.pendingLocationDiscovery,
             confirmedRoute: memory.confirmedRoute
           },
           route_understanding: routeUnderstanding,
@@ -1501,7 +1828,7 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
       }
     }
 
-    // ── Lift route intel into route understanding if matched ──────────────────
+    // â”€â”€ Lift route intel into route understanding if matched â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const topRouteIntel = context.tapiwa_intelligence?.route_intelligence?.[0] || null;
     if (topRouteIntel && routeUnderstanding?.hasRoute && routeIntelMatchesRawRoute(topRouteIntel, routeUnderstanding.pickupRaw, routeUnderstanding.dropoffRaw)) {
       routeUnderstanding.pickup = { Landmark_Name: topRouteIntel.pickup_landmark };
@@ -1510,7 +1837,11 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
       routeUnderstanding.note = "Route resolved from Tapiwa route intelligence.";
     }
 
-    // ── Update conversation memory ────────────────────────────────────────────
+    // â”€â”€ Update conversation memory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (mauriceLocation?.discovery && typeof mauriceLocation.discovery === "object") {
+      memory.pendingLocationDiscovery = mauriceLocation.discovery;
+    }
+
     const detectedRoute = routeSnapshotFromUnderstanding(routeUnderstanding);
     if (detectedRoute) {
       memory.lastRoute = { ...detectedRoute };
@@ -1520,6 +1851,7 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
       } else if (detectedRoute.confidence==="high") {
         memory.confirmedRoute = { ...detectedRoute };
         memory.pendingConfirmation = null;
+        memory.pendingLocationDiscovery = null;
       } else if (detectedRoute.confidence==="medium") {
         memory.confirmedRoute = null;
         memory.pendingConfirmation = { ...detectedRoute };
@@ -1527,13 +1859,15 @@ app.post("/ai/analyze", requireApiAuth, async (req, res) => {
         memory.confirmedRoute = null;
         memory.pendingConfirmation = null;
       }
+    } else if (!mauriceLocation) {
+      memory.pendingLocationDiscovery = null;
     }
     saveConversationMemory(sessionId, memory);
 
-    // ── Calculate fare — passed to Groq as data, not as a bypass ─────────────
+    // â”€â”€ Calculate fare â€” passed to Groq as data, not as a bypass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const computedFare = calculateBasicFare(context);
 
-    // ── Build Tapiwa Gemini prompt ────────────────────────────────────────────
+    // â”€â”€ Build Tapiwa Gemini prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const detectedIntent = detectTapiwaIntent(cleanMessage);
     const operationalMode = isOperationalIntent(detectedIntent);
     const highRiskMode = isHighRiskIntent(detectedIntent, cleanMessage);
@@ -1566,7 +1900,7 @@ CULTURAL STYLE:
 - A small joke, expression, or Chichewa touch is allowed when appropriate.
 - You may occasionally use local expressions like:
   - "Shaaaah"
-  - "pang’ono"
+  - "pangâ€™ono"
   - "zili bwino"
   - "tikuyenda"
   - "koma hold on"
@@ -1588,7 +1922,7 @@ CURRENT MODE:
 - timezone: ${currentDateTime.timezone}
 
 HOW YOU SHOULD TALK:
-- Match the user’s energy.
+- Match the userâ€™s energy.
 - If they are brief, respond briefly.
 - If they are playful, be playful.
 - If they are stressed, calm them down.
@@ -1614,20 +1948,20 @@ HUMOUR RULE:
 - Do not overload every message with jokes.
 - A natural funny phrase is better than a long joke.
 - Examples of acceptable tone:
-  - "Shaaaah, this one is a small town run 😄"
+  - "Shaaaah, this one is a small town run ðŸ˜„"
   - "Easy trip that one, no need to wake the whole village."
-  - "System ikuchita slow pang’ono, koma hold on."
+  - "System ikuchita slow pangâ€™ono, koma hold on."
   - "That route looks straightforward, tikuyenda."
-  - "Morning! Ready to disturb the roads again? 😄"
+  - "Morning! Ready to disturb the roads again? ðŸ˜„"
 
 ERROR HANDLING STYLE:
 - If the system/API/backend has trouble, never repeat the same boring error.
 - Rotate error wording naturally.
 - Acceptable examples:
-  - "Shaaaah 😅 system ikuvuta pang’ono—hold on, zitekha pompano."
-  - "Hmm… looks like the system is dragging a bit. Give me a sec."
-  - "System’s being stubborn today, koma tili pompo."
-  - "Small technical drama here 😄 try again in a moment."
+  - "Shaaaah ðŸ˜… system ikuvuta pangâ€™onoâ€”hold on, zitekha pompano."
+  - "Hmmâ€¦ looks like the system is dragging a bit. Give me a sec."
+  - "Systemâ€™s being stubborn today, koma tili pompo."
+  - "Small technical drama here ðŸ˜„ try again in a moment."
 - Do not sound technical unless the user is debugging.
 - Do not blame the user.
 
@@ -1640,17 +1974,17 @@ OPERATIONAL RULES:
 - You do NOT invent database facts.
 - You explain what the backend gives you.
 - If computed_fare exists, you may explain it naturally.
-- If price data is missing, say naturally: "I don’t have enough system data to price that trip yet."
+- If price data is missing, say naturally: "I donâ€™t have enough system data to price that trip yet."
 - If route confidence is medium, ask one short natural confirmation question.
 - If route confidence is low, ask for clearer pickup and dropoff.
-- If maurice_location.status is "needs_more_info", ask up to THREE short natural clarification questions from maurice_location.question. Keep them friendly and non-robotic. Do not add extra questions beyond those provided.
+- If maurice_location.status is "needs_more_info", ask up to THREE short natural clarification questions from maurice_location.question one by one in a conversational flow, not like a checklist. Keep them friendly and non-robotic. Do not add extra questions beyond those provided.
 - If maurice_location.status is "ready_to_price", give the closest landmark, estimated km range, estimated MWK fare range, confidence level, and a short driver confirmation note.
 - Never say "route not found". Say you are narrowing the place down.
 - Use MWK format for money, for example: "MWK 11,000".
 
 RESPONSE LENGTH:
-- For operational requests: usually 1–2 sentences, but allow personality.
-- For general chat: 1–4 sentences allowed if natural.
+- For operational requests: usually 1â€“2 sentences, but allow personality.
+- For general chat: 1â€“4 sentences allowed if natural.
 - Do not be dry.
 - Do not write essays unless the user asks.
 
@@ -1684,6 +2018,7 @@ Do not wrap JSON in markdown code fences.
       memory: {
         lastRoute: memory.lastRoute,
         pendingConfirmation: memory.pendingConfirmation,
+        pendingLocationDiscovery: memory.pendingLocationDiscovery,
         confirmedRoute: memory.confirmedRoute,
         recentResponses: memory.recentResponses || [],
         recentOpeners: memory.recentOpeners || [],
@@ -1708,7 +2043,7 @@ Do not wrap JSON in markdown code fences.
       risks: context.risks
     };
 
-    // ── Call Gemini for Tapiwa (no Groq fallback) ─────────────────────────────
+    // â”€â”€ Call Gemini for Tapiwa (no Groq fallback) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let aiRawText = "";
     try {
       aiRawText = await callTapiwaGemini({
@@ -1756,8 +2091,8 @@ Do not wrap JSON in markdown code fences.
       });
     }
 
-    // ── Sanitise model output ─────────────────────────────────────────────────
-    const normalizedAi = ENABLE_STRICT_OUTPUT_VALIDATION
+    // â”€â”€ Sanitise model output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    let normalizedAi = ENABLE_STRICT_OUTPUT_VALIDATION
       ? validateAndNormalizeAiResult(aiResult, cleanMessage)
       : {
           category: aiResult.category || "general_update",
@@ -1767,6 +2102,15 @@ Do not wrap JSON in markdown code fences.
           requires_supervisor_approval: aiResult.requires_supervisor_approval === true,
           opening_used: String(aiResult.opening_used || "")
         };
+
+    if (mauriceLocation?.status === "needs_more_info") {
+      // Let Tapiwa keep her natural tone. Only enforce if Gemini failed or returned something too thin.
+      if (!normalizedAi.team_message || normalizedAi.team_message.length < 15) {
+        normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
+      }
+    } else {
+      normalizedAi = enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, computedFare);
+    }
 
     const category = normalizedAi.category;
     const riskLevel = normalizedAi.risk_level;
