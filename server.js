@@ -206,6 +206,62 @@ app.get("/", (req, res) => {
   res.json(buildHealthPayload());
 });
 
+app.post("/admin/landmarks/save", requireApiAuth, async (req, res) => {
+  try {
+    const existingId = String(req.body?.existingId || "").trim();
+    const row = sanitizeLandmarkRow(req.body?.row || {});
+    if (!row.Landmark_ID || !row.Landmark_Name || !row.Zone_ID) {
+      return res.status(400).json({ ok: false, error: "Landmark_ID, Landmark_Name, and Zone_ID are required." });
+    }
+    if (!["Z1","Z2","Z3","Z4","Z5","Z6"].includes(row.Zone_ID)) {
+      return res.status(400).json({ ok: false, error: "Zone_ID must be one of Z1 to Z6." });
+    }
+    let result = null;
+    if (existingId) {
+      result = await supabaseWrite("landmarks", "PATCH", row, {
+        filters: [{ column: "Landmark_ID", operator: "eq", value: existingId }]
+      });
+      if (!result.error && Array.isArray(result.data) && result.data[0]) {
+        return res.json({ ok: true, data: result.data[0] });
+      }
+    }
+    result = await supabaseWrite("landmarks", "POST", [row], { onConflict: "Landmark_ID" });
+    if (result.error) {
+      return res.status(500).json({ ok: false, error: result.error });
+    }
+    const saved = Array.isArray(result.data) ? result.data[0] || null : result.data;
+    return res.json({ ok: true, data: saved });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || "Failed to save landmark." });
+  }
+});
+
+app.delete("/admin/landmarks/:id", requireApiAuth, async (req, res) => {
+  try {
+    const landmarkId = String(req.params?.id || "").trim();
+    if (!landmarkId) {
+      return res.status(400).json({ ok: false, error: "Landmark ID is required." });
+    }
+    const mappingResult = await supabaseWrite("landmark_driver_map", "DELETE", null, {
+      filters: [{ column: "landmark_id", operator: "eq", value: landmarkId }],
+      returnRepresentation: false
+    });
+    if (mappingResult.error) {
+      console.warn("Landmark mapping delete warning:", mappingResult.error);
+    }
+    const landmarkResult = await supabaseWrite("landmarks", "DELETE", null, {
+      filters: [{ column: "Landmark_ID", operator: "eq", value: landmarkId }]
+    });
+    if (landmarkResult.error) {
+      return res.status(500).json({ ok: false, error: landmarkResult.error });
+    }
+    const deleted = Array.isArray(landmarkResult.data) ? landmarkResult.data[0] || null : landmarkResult.data;
+    return res.json({ ok: true, data: deleted });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || "Failed to delete landmark." });
+  }
+});
+
 if (ENABLE_SECURE_DEBUG_ROUTES) {
   app.get("/debug-ai-keys", requireApiAuth, (req, res) => {
     res.json({
@@ -805,6 +861,79 @@ async function supabaseInsert(table, payload) {
   } catch (error) { tableDebug[table] = { ok: false, insert_error: error.message }; return null; }
 }
 
+function clearTableCache(table) {
+  for (const key of tableCache.keys()) {
+    if (key.startsWith(`${table}:`)) tableCache.delete(key);
+  }
+}
+
+async function supabaseWrite(table, method, payload = null, options = {}) {
+  if (!SUPABASE_URL || !SUPABASE_API_KEY) {
+    return { data: null, error: "Supabase is not configured on the server." };
+  }
+  const params = [];
+  if (options.onConflict) params.push(`on_conflict=${encodeURIComponent(options.onConflict)}`);
+  if (Array.isArray(options.filters)) {
+    for (const filter of options.filters) {
+      if (!filter?.column || !filter?.operator) continue;
+      params.push(`${encodeURIComponent(filter.column)}=${filter.operator}.${encodeURIComponent(String(filter.value ?? ""))}`);
+    }
+  }
+  const url = `${cleanBaseUrl()}/rest/v1/${table}${params.length ? `?${params.join("&")}` : ""}`;
+  const headers = {
+    apikey: SUPABASE_API_KEY,
+    Authorization: `Bearer ${SUPABASE_API_KEY}`,
+    "Content-Type": "application/json"
+  };
+  if (options.returnRepresentation !== false) {
+    headers.Prefer = method === "POST" && options.onConflict
+      ? "resolution=merge-duplicates,return=representation"
+      : "return=representation";
+  }
+  try {
+    const response = await fetchWithTimeout(url, {
+      method,
+      headers,
+      body: payload === null ? undefined : JSON.stringify(payload)
+    }, 12000);
+    const text = await response.text();
+    const body = text ? safeJsonParse(text) || text : null;
+    if (!response.ok) {
+      return { data: null, error: body?.message || body?.error || text || `${response.status} ${response.statusText}` };
+    }
+    clearTableCache(table);
+    return { data: body, error: null };
+  } catch (error) {
+    return { data: null, error: error.message || "Supabase write failed." };
+  }
+}
+
+function sanitizeLandmarkRow(raw = {}) {
+  const allowed = [
+    "Landmark_ID",
+    "Landmark_Name",
+    "Also_Known_As",
+    "Area",
+    "Zone_ID",
+    "Landmark_Type",
+    "Nearby_Landmarks",
+    "Active",
+    "Notes"
+  ];
+  const row = {};
+  for (const key of allowed) {
+    if (Object.prototype.hasOwnProperty.call(raw, key)) row[key] = raw[key];
+  }
+  if (row.Zone_ID) row.Zone_ID = String(row.Zone_ID).trim().toUpperCase();
+  if (row.Landmark_ID) row.Landmark_ID = String(row.Landmark_ID).trim();
+  if (row.Landmark_Name) row.Landmark_Name = String(row.Landmark_Name).trim();
+  if (row.Also_Known_As != null) row.Also_Known_As = String(row.Also_Known_As || "").trim();
+  if (row.Area != null) row.Area = String(row.Area || "").trim();
+  if (row.Nearby_Landmarks != null) row.Nearby_Landmarks = String(row.Nearby_Landmarks || "").trim();
+  if (row.Notes && typeof row.Notes !== "string") row.Notes = JSON.stringify(row.Notes);
+  return row;
+}
+
 // â”€â”€ LANDMARK MATCHING â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function levenshtein(a, b) {
@@ -845,6 +974,32 @@ function routeMeaningfulTokens(value) {
 
 function qualifierTokens(value) {
   return routeMeaningfulTokens(value).filter(t => t !== "area" && !/^\d+$/.test(t));
+}
+
+const GENERIC_LOCATION_TERMS = new Set([
+  "area","market","msika","shop","church","school","station","filling","fuel","hospital","clinic",
+  "police","road","junction","roundabout","stage","rank","bridge","turnoff","turn","tuckshop",
+  "office","depot","gate","campus","mall","centre","center","near","close","opposite","behind",
+  "before","after","pa","pafupi","kufupi","town"
+]);
+
+function specificLocationTokens(value) {
+  return routeMeaningfulTokens(value).filter(token => {
+    if (!token) return false;
+    if (/^\d+$/.test(token)) return false;
+    if (/^(ma|area)\d+$/i.test(token)) return false;
+    return !GENERIC_LOCATION_TERMS.has(token);
+  });
+}
+
+function looksLikeGenericLocationFragment(value = "") {
+  const clean = normalizeText(value);
+  if (!clean) return false;
+  const specificTokens = specificLocationTokens(clean);
+  if (/(near|close to|next to|behind|opposite|before|after|pa\s)/.test(clean)) return true;
+  if (/\b(area|ma)\s?\d+\b/.test(clean) && specificTokens.length === 0) return true;
+  if (/\b(market|msika|shop|church|school|filling station|fuel station|hospital|clinic|police|road|junction|roundabout|stage|rank|bridge)\b/.test(clean) && specificTokens.length === 0) return true;
+  return false;
 }
 
 function tokenOverlapRatio(sourceTokens, candidateTokens) {
@@ -913,8 +1068,10 @@ function buildRouteUnderstanding(message, landmarksRaw) {
   const dropoffAmbiguous = dropoffMatch.score>=0.55 && dropoffMatch.score-dropoffMatch.secondScore<0.08 && !dropoffExactNamed;
   const pickupAreaOnly = pickupMatch.source==="area" && qualifierTokens(parts.pickupRaw).length>0;
   const dropoffAreaOnly = dropoffMatch.source==="area" && qualifierTokens(parts.dropoffRaw).length>0;
+  const pickupGeneric = looksLikeGenericLocationFragment(parts.pickupRaw) && !pickupExactNamed;
+  const dropoffGeneric = looksLikeGenericLocationFragment(parts.dropoffRaw) && !dropoffExactNamed;
   let confidence = "low";
-  if (avgScore>=0.78 && !pickupAmbiguous && !dropoffAmbiguous && !pickupAreaOnly && !dropoffAreaOnly) confidence="high";
+  if (avgScore>=0.78 && !pickupAmbiguous && !dropoffAmbiguous && !pickupAreaOnly && !dropoffAreaOnly && !pickupGeneric && !dropoffGeneric) confidence="high";
   else if (avgScore>=0.55) confidence="medium";
   return {
     hasRoute:true, confidence,
@@ -922,7 +1079,13 @@ function buildRouteUnderstanding(message, landmarksRaw) {
     pickup:pickupMatch.match, dropoff:dropoffMatch.match,
     pickup_score:pickupMatch.score, dropoff_score:dropoffMatch.score,
     pickup_source:pickupMatch.source, dropoff_source:dropoffMatch.source,
-    note: confidence==="high" ? "Route understood clearly." : confidence==="medium" ? "Route partly understood; needs confirmation." : "Route unclear; ask for clarification."
+    note: confidence==="high"
+      ? "Route understood clearly."
+      : pickupGeneric || dropoffGeneric
+        ? "Route uses a generic landmark clue; ask for clarification."
+        : confidence==="medium"
+          ? "Route partly understood; needs confirmation."
+          : "Route unclear; ask for clarification."
   };
 }
 
@@ -1690,7 +1853,8 @@ function enforceLocationDiscoveryResponse(normalizedAi, mauriceLocation, compute
   if (mauriceLocation.status === "ready_to_price") {
     const text = normalizeText(normalizedAi.team_message || "");
     const shouldOverride = !normalizedAi.team_message
-      || /route not found|i don t know|i dont know|unclear route|cannot find/.test(text);
+      || normalizedAi.category === "system_issue"
+      || /route not found|i don t know|i dont know|unclear route|cannot find|small hiccup|system.*dragging|system.*stubborn|technical drama|not responding properly|line to the system|hold on/.test(text);
 
     if (shouldOverride) {
       return {
