@@ -1,3 +1,13 @@
+    title: body.title || "",
+    body: body.body || "",
+    tripId: body.tripId || body.trip_id || inputData.tripId || inputData.trip_id || "",
+    tripNo: body.tripNo || body.trip_no || inputData.tripNo || inputData.trip_no || "",
+    role: body.role || inputData.role || "",
+    email: body.email || body.user_email || inputData.email || inputData.user_email || "",
+    panel: body.panel || inputData.panel || "",
+    threadId: body.threadId || body.thread_id || inputData.threadId || inputData.thread_id || "",
+    ...inputData,
+    type
   });
 }
 
@@ -238,13 +248,3 @@ async function saveConversationMemoryToDisk() {
 }
 
 function scheduleConversationMemorySave() {
-  if (memorySaveTimer) clearTimeout(memorySaveTimer);
-  memorySaveTimer = setTimeout(() => {
-    memorySaveTimer = null;
-    saveConversationMemoryToDisk().catch(() => {});
-  }, 250);
-}
-
-function loadConversationMemoryFromDisk() {
-  try {
-    if (!fs.existsSync(MEMORY_FILE)) return;
