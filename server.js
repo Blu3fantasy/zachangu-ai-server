@@ -6,9 +6,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { rateLimit } from "express-rate-limit";
 import { getFirebaseAdminStatus, normalizeFirebaseDataPayload, sendFirebaseNotification } from "./firebaseAdmin.js";
-
 dotenv.config();
-
 const NODE_ENV = String(process.env.NODE_ENV || "development");
 const IS_PROD = NODE_ENV === "production";
 const PERSONA_VERSION = "2026-05-05.1";
@@ -19,7 +17,6 @@ const EXPOSE_DEBUG_PAYLOADS = process.env.EXPOSE_DEBUG_PAYLOADS === "true" && !I
 const REQUIRE_API_AUTH = process.env.REQUIRE_API_AUTH === "true";
 const API_SERVER_KEY = String(process.env.AI_SERVER_API_KEY || "");
 const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ALLOWED_ORIGINS || "");
-
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GEMMA_API_KEY || "";
 const TAPIWA_PROVIDER = "gemini";
@@ -53,7 +50,6 @@ const STATIC_TABLE_CACHE = new Set([
   "tapiwa_zone_behavior",
   "tapiwa_route_learning"
 ]);
-
 const TAPIWA_RESPONSE_SCHEMA = {
   type: "OBJECT",
   required: [
@@ -73,14 +69,12 @@ const TAPIWA_RESPONSE_SCHEMA = {
     opening_used: { type: "STRING" }
   }
 };
-
 function parseCsvList(value = "") {
   return String(value)
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
 }
-
 const allowedCorsOrigins = parseCsvList(CORS_ALLOWED_ORIGINS);
 const allowAllCorsOrigins = allowedCorsOrigins.includes("*");
 function isOriginAllowed(origin) {
@@ -89,7 +83,6 @@ function isOriginAllowed(origin) {
   if (allowAllCorsOrigins) return true;
   return allowedCorsOrigins.includes(origin);
 }
-
 const app = express();
 // Railway proxy fix for express-rate-limit
 app.set("trust proxy", 1);
