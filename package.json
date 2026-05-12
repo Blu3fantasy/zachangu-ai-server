@@ -4,12 +4,26 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "cap:sync": "cap sync android",
+    "apk:debug": "cd android && gradlew.bat assembleDebug",
+    "apk:clean": "cd android && gradlew.bat clean",
+    "apk:build": "npm install && npx cap sync android && cd android && gradlew.bat assembleDebug"
   },
   "dependencies": {
+    "@capacitor/android": "^8.3.3",
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/cli": "^8.3.3",
+    "@capacitor/core": "^8.3.3",
+    "@capacitor/local-notifications": "^8.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.18.3",
     "express-rate-limit": "^7.4.1"
-  }
+  },
+  "description": "",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "npm@10"
 }
